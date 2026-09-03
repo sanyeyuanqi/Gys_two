@@ -1387,7 +1387,8 @@ function Shell({
   const [passwordError, setPasswordError] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
-  const visibleNavItems = user.role === 'sub' ? subAccountNavItems : navItems;
+  const visibleNavItems = (user.role === 'sub' ? subAccountNavItems : navItems)
+    .filter(item => item.key !== 'api-access');
 
   useEffect(() => {
     if (!accountMenuOpen) return;
