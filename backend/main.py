@@ -445,99 +445,6 @@ def sanitize_data(value: Any) -> Any:
     return {key: sanitize_data(item) for key, item in value.items() if key not in blocked}
 
 
-def dollars(value: Any) -> str:
-    try:
-        return f"{float(value or 0) / 500_000:.4f}"
-    except (TypeError, ValueError):
-        return "0.0000"
-
-
-async def platform_usage(session: sqlite3.Row, target_id: int) -> dict[str, Any]:
-    children = await authorized_json(session, "/api/sub-accounts")
-    items = children if isinstance(children, list) else children.get("items", [])
-    source = next(
-        (item for item in items if isinstance(item, dict) and int(item.get("id", 0)) == target_id),
-        None,
-    )
-    if source is None:
-        raise BackendError(404, "子账号不存在")
-
-    channels: list[dict[str, Any]] = []
-    identifiers: set[int] = set()
-    expected_total: int | None = None
-    expected_size: int | None = None
-    page = 1
-    while True:
-        data = await authorized_json(session, f"/api/channels?page={page}&page_size=500")
-        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
-            raise BackendError(502, "渠道数据格式不正确，无法准确统计。")
-        try:
-            total = int(data["total"])
-            page_size = int(data["page_size"])
-            current_page = int(data["page"])
-        except (KeyError, TypeError, ValueError) as error:
-            raise BackendError(502, "渠道分页数据不完整，请刷新重试。") from error
-        if current_page != page or total < 0 or page_size <= 0:
-            raise BackendError(502, "渠道分页数据不完整，请刷新重试。")
-        if expected_total is not None and (total != expected_total or page_size != expected_size):
-            raise BackendError(502, "读取期间渠道记录发生变化，请刷新重试。")
-        expected_total, expected_size = total, page_size
-        page_items = data["items"]
-        if len(page_items) != min(page_size, total - len(channels)):
-            raise BackendError(502, "渠道分页数据不完整，请刷新重试。")
-        for item in page_items:
-            if not isinstance(item, dict):
-                raise BackendError(502, "渠道数据格式不正确，无法准确统计。")
-            try:
-                channel_id = int(item["id"])
-                uploader_id = int(item.get("uploader_id", 0))
-                quota = int(item.get("used_quota", 0))
-            except (KeyError, TypeError, ValueError) as error:
-                raise BackendError(502, "渠道数据格式不正确，无法准确统计。") from error
-            if channel_id in identifiers:
-                raise BackendError(502, "读取期间渠道记录发生变化，请刷新重试。")
-            identifiers.add(channel_id)
-            channels.append(
-                {
-                    "uploader_id": uploader_id,
-                    "category": str(item.get("category") or "").strip(),
-                    "quota": quota,
-                }
-            )
-        if len(channels) == total:
-            break
-        page += 1
-
-    grouped: dict[str, dict[str, Any]] = {}
-    total_quota = 0
-    channel_count = 0
-    for channel in channels:
-        if channel["uploader_id"] != target_id:
-            continue
-        category = channel["category"]
-        group = grouped.setdefault(category, {"category": category, "quota": 0, "channelCount": 0})
-        group["quota"] += channel["quota"]
-        group["channelCount"] += 1
-        total_quota += channel["quota"]
-        channel_count += 1
-    platforms = sorted(grouped.values(), key=lambda item: (-item["quota"], item["category"]))
-    return {
-        "totalAmount": dollars(total_quota),
-        "channelCount": channel_count,
-        "listedAmount": None if "used_quota" not in source else dollars(source["used_quota"]),
-        "amountsDiffer": "used_quota" in source and int(source["used_quota"] or 0) != total_quota,
-        "platforms": [
-            {
-                "category": item["category"],
-                "channelCount": item["channelCount"],
-                "amount": dollars(item["quota"]),
-                "sharePercent": f"{(item['quota'] / total_quota * 100) if total_quota else 0:.2f}",
-            }
-            for item in platforms
-        ],
-    }
-
-
 def request_origin(request: Request) -> str:
     configured = os.environ.get("GYS_PUBLIC_ORIGIN", "").strip()
     if configured:
@@ -772,14 +679,6 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 body={"username": username, "display_name": display_name, "password": password},
             )
             return success_response(request, request_id, sanitize_data(data), cookie)
-
-        usage_match = re.fullmatch(r"/api/sub-accounts/(\d+)/platform-usage", path)
-        if usage_match and request.method == "GET":
-            if session["role"] not in {"supplier", "admin"}:
-                raise BackendError(403, "当前账号无权管理子账号")
-            target_id = int(usage_match.group(1))
-            data = await platform_usage(session, target_id)
-            return success_response(request, request_id, data, cookie)
 
         allowed_patterns = READ_PATHS if request.method == "GET" else WRITE_PATHS.get(request.method, ())
         if not any(pattern.fullmatch(path) for pattern in allowed_patterns):

@@ -211,14 +211,6 @@ type SubAccount = {
   status?: number;
 };
 
-type PlatformUsageSummary = {
-  totalAmount: string;
-  channelCount: number;
-  listedAmount: string | null;
-  amountsDiffer: boolean;
-  platforms: Array<{ category: string; amount: string; channelCount: number; sharePercent: string }>;
-};
-
 type Notice = {
   type: 'ok' | 'warn' | 'error';
   text: string;
@@ -252,23 +244,6 @@ const englishTranslations: Record<string, string> = {
   '刷新': 'Refresh',
   '提交': 'Submit',
   '操作': 'Actions',
-  '查看消耗': 'View Usage',
-  '查看 {{name}} 的平台消耗': 'View platform usage for {{name}}',
-  '平台消耗': 'Platform Usage',
-  '平台': 'Platform',
-  '涉及平台': 'Platforms',
-  '渠道记录': 'Channel Records',
-  '渠道消耗合计': 'Total Channel Usage',
-  '未分类': 'Uncategorized',
-  '正在汇总全部渠道': 'Loading all channels',
-  '已读取 {{loaded}} / {{total}} 条渠道记录': '{{loaded}} / {{total}} channel records loaded',
-  '加载平台消耗失败': 'Failed to load platform usage',
-  '渠道数据缺少有效的上传用户或额度信息，无法准确统计。': 'Channel data is missing valid uploader or quota information. Usage cannot be calculated accurately.',
-  '渠道分页数据不完整，请刷新重试。': 'Channel pages are incomplete. Please refresh and retry.',
-  '读取期间渠道记录发生变化，请刷新重试。': 'Channel records changed while loading. Please refresh and retry.',
-  '该用户暂无可查询的渠道记录': 'No channel records are available for this user',
-  '子账号列表额度为 {{amount}}，与当前可查询渠道合计不同。': 'The sub-account list shows {{amount}}, which differs from the currently available channel total.',
-  '统计口径：我的渠道返回的全部记录，按上传用户和平台分类汇总。': 'Source: all records returned by My Channels, grouped by uploader and platform category.',
   '状态': 'Status',
   '分类': 'Category',
   '备注': 'Note',
@@ -498,7 +473,7 @@ const englishTranslations: Record<string, string> = {
   '暂无缺口': 'No Gaps',
   '目前没有模型缺口提醒。': 'There are currently no model gap alerts.',
   '当前账号无权限管理子账号': 'This account cannot manage sub-accounts',
-  '管理子账号及其平台消耗。': 'Manage sub-accounts and platform usage.',
+  '管理子账号。': 'Manage sub-accounts.',
   '正在检查权限': 'Checking permissions',
   '新增子账号': 'Add Sub-account',
   '创建子账号': 'Create Sub-account',
@@ -3974,112 +3949,6 @@ function ModelGapsView() {
   );
 }
 
-function SubAccountUsageDialog({
-  account,
-  onClose,
-}: {
-  account: SubAccount;
-  onClose: () => void;
-}) {
-  const { language, t } = useLanguage();
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const [attempt, setAttempt] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [summary, setSummary] = useState<PlatformUsageSummary | null>(null);
-  const [error, setError] = useState('');
-
-  useEffect(() => {
-    const dialog = dialogRef.current;
-    dialog?.showModal();
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
-    return () => {
-      dialog?.close();
-      document.body.style.overflow = previousOverflow;
-    };
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setSummary(null);
-    setError('');
-    api<PlatformUsageSummary>(`/api/sub-accounts/${account.id}/platform-usage`, {
-      signal: controller.signal,
-      fresh: true,
-    }).then(value => {
-      if (!controller.signal.aborted) setSummary(value);
-    }).catch(failure => {
-      if (controller.signal.aborted) return;
-      setError(failure instanceof Error ? failure.message : t('加载平台消耗失败'));
-    }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
-    });
-    return () => controller.abort();
-  }, [account.id, attempt, t]);
-
-  return (
-    <dialog
-      ref={dialogRef}
-      className="platform-usage-dialog"
-      aria-labelledby="platform-usage-title"
-      onCancel={event => { event.preventDefault(); onClose(); }}
-    >
-      <header className="platform-usage-header">
-        <div>
-          <h2 id="platform-usage-title"><BarChart3 size={19} />{t('平台消耗')}</h2>
-          <p>{account.display_name || account.username} · {account.username} · ID {account.id}</p>
-        </div>
-        <div className="platform-usage-tools">
-          <button className="icon-button" type="button" onClick={() => setAttempt(value => value + 1)} disabled={loading} aria-label={t('刷新')} title={t('刷新')}>
-            <RefreshCcw size={17} className={loading ? 'spin' : ''} />
-          </button>
-          <button className="icon-button" type="button" onClick={onClose} aria-label={t('关闭')} title={t('关闭')}><X size={19} /></button>
-        </div>
-      </header>
-      <div className="platform-usage-body" aria-busy={loading}>
-        {loading ? (
-          <div className="platform-usage-loading" role="status">
-            <Loader2 size={24} className="spin" />
-            <span>{t('正在汇总全部渠道')}</span>
-          </div>
-        ) : error ? (
-          <div className="platform-usage-error" role="alert">
-            <AlertTriangle size={24} /><p>{error}</p>
-            <button className="ghost-button compact" type="button" onClick={() => setAttempt(value => value + 1)}><RefreshCcw size={16} />{t('重试')}</button>
-          </div>
-        ) : summary && <>
-          <dl className="platform-usage-totals">
-            <div><dt>{t('渠道消耗合计')}</dt><dd>${summary.totalAmount}</dd></div>
-            <div><dt>{t('涉及平台')}</dt><dd>{summary.platforms.length}</dd></div>
-            <div><dt>{t('渠道记录')}</dt><dd>{summary.channelCount.toLocaleString(language === 'en' ? 'en-US' : 'zh-CN')}</dd></div>
-          </dl>
-          {summary.amountsDiffer && (
-            <NoticeBanner notice={{ type: 'warn', text: t('子账号列表额度为 {{amount}}，与当前可查询渠道合计不同。', { amount: `$${summary.listedAmount}` }) }} />
-          )}
-          {summary.platforms.length ? (
-            <div className="table-wrap">
-              <table className="platform-usage-table">
-                <thead><tr><th>{t('平台')}</th><th>{t('渠道记录')}</th><th>{t('已用额度')} ($)</th><th>{t('占比')}</th></tr></thead>
-                <tbody>{summary.platforms.map(platform => (
-                  <tr key={platform.category}>
-                    <td>{platform.category ? categoryLabel(platform.category, language) : t('未分类')}</td>
-                    <td>{platform.channelCount.toLocaleString(language === 'en' ? 'en-US' : 'zh-CN')}</td>
-                    <td className="platform-usage-amount">${platform.amount}</td>
-                    <td><div className="platform-usage-share"><span className="platform-usage-track" aria-hidden="true"><i style={{ width: `${platform.sharePercent}%` }} /></span><span>{platform.sharePercent}%</span></div></td>
-                  </tr>
-                ))}</tbody>
-              </table>
-            </div>
-          ) : <div className="platform-usage-empty"><Inbox size={32} /><p>{t('该用户暂无可查询的渠道记录')}</p></div>}
-          <p className="platform-usage-source">{t('统计口径：我的渠道返回的全部记录，按上传用户和平台分类汇总。')}</p>
-        </>}
-      </div>
-      <footer className="platform-usage-footer"><button className="ghost-button compact" type="button" onClick={onClose}>{t('关闭')}</button></footer>
-    </dialog>
-  );
-}
-
 function CreateSubAccountDialog({
   onClose,
   onCreated,
@@ -4222,7 +4091,6 @@ function SubAccountsView() {
   const [items, setItems] = useState<SubAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [usageAccount, setUsageAccount] = useState<SubAccount | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
 
   const load = useCallback(async (fresh = false) => {
@@ -4256,7 +4124,7 @@ function SubAccountsView() {
       <PageHeading
         icon={Users}
         title={t('子账号管理')}
-        subtitle={t('管理子账号及其平台消耗。')}
+        subtitle={t('管理子账号。')}
         action={
           <div className="action-row">
             <button className="ghost-button compact" onClick={() => load(true)} type="button">
@@ -4288,7 +4156,6 @@ function SubAccountsView() {
                   <th>{t('渠道数')}</th>
                   <th>{t('已用额度')}</th>
                   <th>{t('状态')}</th>
-                  <th>{t('操作')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -4302,11 +4169,6 @@ function SubAccountsView() {
                     <td>
                       <Badge tone={item.status === 1 ? 'green' : 'red'}>{statusLabel(item.status, language)}</Badge>
                     </td>
-                    <td>
-                      <button className="sub-account-usage-button" type="button" onClick={() => setUsageAccount(item)} aria-label={t('查看 {{name}} 的平台消耗', { name: item.username })}>
-                        <BarChart3 size={15} />{t('查看消耗')}
-                      </button>
-                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -4316,7 +4178,6 @@ function SubAccountsView() {
           <EmptyState title={t('暂无子账号')} description={t('点击“新增子账号”创建第一个子账号。')} />
         )}
       </div>
-      {usageAccount && <SubAccountUsageDialog key={usageAccount.id} account={usageAccount} onClose={() => setUsageAccount(null)} />}
       {createOpen && <CreateSubAccountDialog onClose={() => setCreateOpen(false)} onCreated={handleCreated} />}
     </section>
   );
