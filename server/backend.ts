@@ -101,11 +101,11 @@ function checkOrigin(request: Request) {
 
 async function readBody(request: Request) {
   if (!request.body) return {} as Record<string, unknown>;
-  const contentType = request.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
-  if (contentType !== 'application/json') throw new BackendError(415, '请使用 JSON 提交数据');
   const text = await request.text();
   if (!text) return {} as Record<string, unknown>;
   if (new Blob([text]).size > 4 * 1024 * 1024) throw new BackendError(413, '提交内容过大');
+  const contentType = request.headers.get('content-type')?.split(';')[0].trim().toLowerCase();
+  if (contentType !== 'application/json') throw new BackendError(415, '请使用 JSON 提交数据');
   try {
     const value: unknown = JSON.parse(text);
     if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
