@@ -509,8 +509,6 @@ const englishTranslations: Record<string, string> = {
   '登录用户名': 'Login username',
   '显示名称': 'Display name',
   '密码': 'Password',
-  '确认密码': 'Confirm Password',
-  '两次输入的密码不一致': 'The passwords do not match',
   '密码至少8位，须含字母、数字和特殊字符': 'Use at least 8 characters with a letter, number, and special character',
   '显示密码': 'Show password',
   '隐藏密码': 'Hide password',
@@ -4093,9 +4091,7 @@ function CreateSubAccountDialog({
   const [username, setUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
-  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
@@ -4118,10 +4114,6 @@ function CreateSubAccountDialog({
       || !/[^A-Za-z0-9]/.test(password)
     ) {
       setError(t('密码至少8位，须含字母、数字和特殊字符'));
-      return;
-    }
-    if (password !== confirmPassword) {
-      setError(t('两次输入的密码不一致'));
       return;
     }
     setSaving(true);
@@ -4206,27 +4198,6 @@ function CreateSubAccountDialog({
                 type="button"
               >
                 {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
-              </button>
-            </span>
-          </label>
-          <label>
-            <span>{t('确认密码')}</span>
-            <span className="password-input-wrap">
-              <input
-                autoComplete="new-password"
-                maxLength={4096}
-                minLength={8}
-                onChange={event => setConfirmPassword(event.target.value)}
-                required
-                type={showConfirmPassword ? 'text' : 'password'}
-                value={confirmPassword}
-              />
-              <button
-                aria-label={t(showConfirmPassword ? '隐藏密码' : '显示密码')}
-                onClick={() => setShowConfirmPassword(value => !value)}
-                type="button"
-              >
-                {showConfirmPassword ? <EyeOff size={17} /> : <Eye size={17} />}
               </button>
             </span>
           </label>
