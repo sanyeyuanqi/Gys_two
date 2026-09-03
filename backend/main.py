@@ -94,21 +94,41 @@ class SessionStore:
                     public_username TEXT COLLATE NOCASE PRIMARY KEY,
                     upstream_username TEXT COLLATE NOCASE NOT NULL UNIQUE,
                     display_name TEXT NOT NULL,
+                    account_kind TEXT NOT NULL DEFAULT 'primary',
+                    upstream_user_id INTEGER,
                     active INTEGER NOT NULL DEFAULT 1,
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
                 """
             )
+            alias_columns = {
+                str(row["name"])
+                for row in self.connection.execute("PRAGMA table_info(account_aliases)").fetchall()
+            }
+            if "account_kind" not in alias_columns:
+                self.connection.execute(
+                    "ALTER TABLE account_aliases ADD COLUMN account_kind TEXT NOT NULL DEFAULT 'primary'"
+                )
+            if "upstream_user_id" not in alias_columns:
+                self.connection.execute(
+                    "ALTER TABLE account_aliases ADD COLUMN upstream_user_id INTEGER"
+                )
+            self.connection.execute(
+                "CREATE INDEX IF NOT EXISTS idx_account_aliases_upstream_user_id "
+                "ON account_aliases(upstream_user_id)"
+            )
             now = int(time.time() * 1000)
             self.connection.executemany(
                 """
                 INSERT INTO account_aliases
-                    (public_username, upstream_username, display_name, active, created_at, updated_at)
-                VALUES (?, ?, ?, 1, ?, ?)
+                    (public_username, upstream_username, display_name, account_kind,
+                     active, created_at, updated_at)
+                VALUES (?, ?, ?, 'primary', 1, ?, ?)
                 ON CONFLICT(public_username) DO UPDATE SET
                     upstream_username = excluded.upstream_username,
                     display_name = excluded.display_name,
+                    account_kind = 'primary',
                     active = 1,
                     updated_at = excluded.updated_at
                 """,
@@ -258,6 +278,216 @@ class SessionStore:
             parsed["username"] = str(alias["public_username"])
             parsed["display_name"] = str(alias["display_name"] or alias["public_username"])
         return parsed
+
+    def reserve_sub_account_alias(
+        self,
+        public_username: str,
+        upstream_username: str,
+        display_name: str,
+    ) -> None:
+        now = int(time.time() * 1000)
+        with self.lock:
+            conflict = self.connection.execute(
+                """
+                SELECT 1 FROM account_aliases
+                WHERE active = 1 AND (public_username = ? OR upstream_username = ?)
+                """,
+                (public_username, upstream_username),
+            ).fetchone()
+            if conflict is not None:
+                raise BackendError(409, "映射用户名已存在")
+            self.connection.execute(
+                "DELETE FROM account_aliases WHERE active = 0 AND public_username = ?",
+                (public_username,),
+            )
+            self.connection.execute(
+                """
+                INSERT INTO account_aliases
+                    (public_username, upstream_username, display_name, account_kind,
+                     upstream_user_id, active, created_at, updated_at)
+                VALUES (?, ?, ?, 'sub', NULL, 1, ?, ?)
+                """,
+                (public_username, upstream_username, display_name, now, now),
+            )
+            self.connection.commit()
+
+    def release_sub_account_alias(self, upstream_username: str) -> None:
+        with self.lock:
+            self.connection.execute(
+                "DELETE FROM account_aliases WHERE account_kind = 'sub' AND upstream_username = ?",
+                (upstream_username,),
+            )
+            self.connection.commit()
+
+    def attach_sub_account_alias(self, upstream_username: str, upstream_user_id: int | None) -> None:
+        if upstream_user_id is None or upstream_user_id <= 0:
+            return
+        with self.lock:
+            self.connection.execute(
+                """
+                UPDATE account_aliases
+                SET upstream_user_id = ?, updated_at = ?
+                WHERE account_kind = 'sub' AND upstream_username = ?
+                """,
+                (upstream_user_id, int(time.time() * 1000), upstream_username),
+            )
+            self.connection.commit()
+
+    def ensure_sub_account_alias(self, item: dict[str, Any]) -> dict[str, Any]:
+        try:
+            upstream_user_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            return item
+        upstream_username = item.get("username")
+        upstream_username = upstream_username.strip() if isinstance(upstream_username, str) else ""
+        if upstream_user_id <= 0 or not upstream_username:
+            return item
+        display_name = item.get("display_name")
+        display_name = display_name.strip() if isinstance(display_name, str) else upstream_username
+        now = int(time.time() * 1000)
+        with self.lock:
+            alias = self.connection.execute(
+                """
+                SELECT public_username, display_name
+                FROM account_aliases
+                WHERE upstream_username = ? AND active = 1
+                """,
+                (upstream_username,),
+            ).fetchone()
+            if alias is None:
+                base = f"sub_{upstream_user_id}"
+                public_username = base
+                suffix = 2
+                while self.connection.execute(
+                    "SELECT 1 FROM account_aliases WHERE public_username = ? AND active = 1",
+                    (public_username,),
+                ).fetchone() is not None:
+                    public_username = f"{base}_{suffix}"
+                    suffix += 1
+                self.connection.execute(
+                    """
+                    INSERT INTO account_aliases
+                        (public_username, upstream_username, display_name, account_kind,
+                         upstream_user_id, active, created_at, updated_at)
+                    VALUES (?, ?, ?, 'sub', ?, 1, ?, ?)
+                    """,
+                    (public_username, upstream_username, display_name, upstream_user_id, now, now),
+                )
+                alias = {"public_username": public_username, "display_name": display_name}
+            else:
+                self.connection.execute(
+                    """
+                    UPDATE account_aliases
+                    SET upstream_user_id = COALESCE(upstream_user_id, ?), updated_at = ?
+                    WHERE upstream_username = ?
+                    """,
+                    (upstream_user_id, now, upstream_username),
+                )
+            self.connection.execute(
+                """
+                UPDATE upstream_sessions
+                SET username = ?, display_name = ?
+                WHERE role = 'sub' AND username = ?
+                """,
+                (alias["public_username"], alias["display_name"], upstream_username),
+            )
+            self.connection.commit()
+        return {
+            **item,
+            "username": str(alias["public_username"]),
+            "display_name": str(alias["display_name"] or alias["public_username"]),
+        }
+
+    def publicize_sub_accounts(self, data: Any) -> Any:
+        if isinstance(data, list):
+            return [self.ensure_sub_account_alias(item) if isinstance(item, dict) else item for item in data]
+        if not isinstance(data, dict):
+            return data
+        items = data.get("items")
+        if isinstance(items, list):
+            return {
+                **data,
+                "items": [
+                    self.ensure_sub_account_alias(item) if isinstance(item, dict) else item
+                    for item in items
+                ],
+            }
+        return data
+
+    def rename_sub_account_alias(
+        self,
+        upstream_user_id: int,
+        public_username: str,
+        display_name: str,
+    ) -> None:
+        now = int(time.time() * 1000)
+        with self.lock:
+            current = self.connection.execute(
+                """
+                SELECT public_username, upstream_username
+                FROM account_aliases
+                WHERE account_kind = 'sub' AND upstream_user_id = ? AND active = 1
+                """,
+                (upstream_user_id,),
+            ).fetchone()
+            if current is None:
+                raise BackendError(404, "子账号映射不存在，请刷新后重试")
+            conflict = self.connection.execute(
+                """
+                SELECT 1 FROM account_aliases
+                WHERE public_username = ? AND public_username <> ? AND active = 1
+                """,
+                (public_username, current["public_username"]),
+            ).fetchone()
+            if conflict is not None:
+                raise BackendError(409, "映射用户名已存在")
+            self.connection.execute(
+                """
+                UPDATE account_aliases
+                SET public_username = ?, display_name = ?, updated_at = ?
+                WHERE account_kind = 'sub' AND upstream_user_id = ?
+                """,
+                (public_username, display_name, now, upstream_user_id),
+            )
+            self.connection.execute(
+                """
+                UPDATE upstream_sessions
+                SET username = ?, display_name = ?
+                WHERE role = 'sub' AND username IN (?, ?)
+                """,
+                (public_username, display_name, current["public_username"], current["upstream_username"]),
+            )
+            self.connection.commit()
+
+    def assert_sub_account_alias_available(self, upstream_user_id: int, public_username: str) -> None:
+        with self.lock:
+            current = self.connection.execute(
+                """
+                SELECT public_username
+                FROM account_aliases
+                WHERE account_kind = 'sub' AND upstream_user_id = ? AND active = 1
+                """,
+                (upstream_user_id,),
+            ).fetchone()
+            if current is None:
+                raise BackendError(404, "子账号映射不存在，请刷新后重试")
+            conflict = self.connection.execute(
+                """
+                SELECT 1 FROM account_aliases
+                WHERE public_username = ? AND public_username <> ? AND active = 1
+                """,
+                (public_username, current["public_username"]),
+            ).fetchone()
+        if conflict is not None:
+            raise BackendError(409, "映射用户名已存在")
+
+    def delete_sub_account_alias(self, upstream_user_id: int) -> None:
+        with self.lock:
+            self.connection.execute(
+                "DELETE FROM account_aliases WHERE account_kind = 'sub' AND upstream_user_id = ?",
+                (upstream_user_id,),
+            )
+            self.connection.commit()
 
     def touch(self, session: sqlite3.Row) -> int:
         now = int(time.time() * 1000)
@@ -725,6 +955,17 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             data = await authorized_json(session, path, method="POST", body=body)
             return success_response(request, request_id, sanitize_data(data), cookie)
 
+        if path == "/api/sub-accounts" and request.method == "GET":
+            if session["role"] not in {"supplier", "admin"}:
+                raise BackendError(403, "当前账号无权管理子账号")
+            data = await authorized_json(session, path)
+            return success_response(
+                request,
+                request_id,
+                sanitize_data(store.publicize_sub_accounts(data)),
+                cookie,
+            )
+
         if path == "/api/sub-accounts" and request.method == "POST":
             if session["role"] not in {"supplier", "admin"}:
                 raise BackendError(403, "当前账号无权管理子账号")
@@ -735,8 +976,8 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             username = username.strip() if isinstance(username, str) else ""
             display_name = display_name.strip() if isinstance(display_name, str) else ""
             password = password if isinstance(password, str) else ""
-            if not username or len(username) > 128:
-                raise BackendError(400, "请输入有效的用户名")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
+                raise BackendError(400, "映射用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
                 raise BackendError(400, "请输入有效的显示名")
             if (
@@ -747,12 +988,30 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 or not re.search(r"[^A-Za-z0-9]", password)
             ):
                 raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
-            data = await authorized_json(
-                session,
-                path,
-                method="POST",
-                body={"username": username, "display_name": display_name, "password": password},
-            )
+            upstream_username = f"gys{secrets.token_hex(10)}"
+            store.reserve_sub_account_alias(username, upstream_username, display_name)
+            try:
+                data = await authorized_json(
+                    session,
+                    path,
+                    method="POST",
+                    body={
+                        "username": upstream_username,
+                        "display_name": display_name,
+                        "password": password,
+                    },
+                )
+            except Exception:
+                store.release_sub_account_alias(upstream_username)
+                raise
+            created_id: int | None = None
+            if isinstance(data, dict):
+                try:
+                    created_id = int(data.get("id", data.get("user_id")))
+                except (TypeError, ValueError):
+                    created_id = None
+                data = {**data, "username": username, "display_name": display_name}
+            store.attach_sub_account_alias(upstream_username, created_id)
             return success_response(request, request_id, sanitize_data(data), cookie)
 
         sub_account_match = re.fullmatch(r"/api/sub-accounts/(\d+)", path)
@@ -764,13 +1023,18 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(400, "子账号 ID 无效")
             if request.method == "DELETE":
                 data = await authorized_json(session, path, method="DELETE")
+                store.delete_sub_account_alias(target_id)
                 return success_response(request, request_id, sanitize_data(data), cookie)
 
             body = await read_body(request)
+            username = body.get("username")
             display_name = body.get("display_name")
             status = body.get("status")
             password = body.get("password")
+            username = username.strip() if isinstance(username, str) else ""
             display_name = display_name.strip() if isinstance(display_name, str) else ""
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
+                raise BackendError(400, "映射用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
                 raise BackendError(400, "请输入有效的显示名")
             if isinstance(status, bool):
@@ -788,7 +1052,9 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 ):
                     raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
                 update_body["password"] = password
+            store.assert_sub_account_alias_available(target_id, username)
             data = await authorized_json(session, path, method="PUT", body=update_body)
+            store.rename_sub_account_alias(target_id, username, display_name)
             return success_response(request, request_id, sanitize_data(data), cookie)
 
         allowed_patterns = READ_PATHS if request.method == "GET" else WRITE_PATHS.get(request.method, ())

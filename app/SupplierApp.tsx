@@ -497,6 +497,9 @@ const englishTranslations: Record<string, string> = {
   '编辑 {{name}}': 'Edit {{name}}',
   '删除 {{name}}': 'Delete {{name}}',
   '请输入用户名': 'Enter a username',
+  '映射用户名': 'Mapped Username',
+  '登录用户名（映射）': 'Login username (mapped)',
+  '映射用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
   '请输入显示名': 'Enter a display name',
   '登录用户名': 'Login username',
   '显示名称': 'Display name',
@@ -3997,6 +4000,10 @@ function CreateSubAccountDialog({
       setError(t('请输入用户名'));
       return;
     }
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
+      setError(t('映射用户名须为3至64位字母、数字、点、横线或下划线'));
+      return;
+    }
     if (!cleanDisplayName) {
       setError(t('请输入显示名'));
       return;
@@ -4046,13 +4053,15 @@ function CreateSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('用户名')}</span>
+            <span>{t('映射用户名')}</span>
             <input
               autoComplete="off"
               autoFocus
-              maxLength={128}
+              maxLength={64}
+              minLength={3}
               onChange={event => setUsername(event.target.value)}
-              placeholder={t('登录用户名')}
+              pattern="[A-Za-z0-9_.-]{3,64}"
+              placeholder={t('登录用户名（映射）')}
               required
               value={username}
             />
@@ -4116,6 +4125,7 @@ function EditSubAccountDialog({
   onUpdated: () => Promise<void>;
 }) {
   const { t } = useLanguage();
+  const [username, setUsername] = useState(account.username);
   const [displayName, setDisplayName] = useState(account.display_name || account.username);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -4125,7 +4135,12 @@ function EditSubAccountDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const cleanUsername = username.trim();
     const cleanDisplayName = displayName.trim();
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
+      setError(t('映射用户名须为3至64位字母、数字、点、横线或下划线'));
+      return;
+    }
     if (!cleanDisplayName) {
       setError(t('请输入显示名'));
       return;
@@ -4140,6 +4155,7 @@ function EditSubAccountDialog({
       await api(`/api/sub-accounts/${account.id}`, {
         method: 'PUT',
         body: {
+          username: cleanUsername,
           display_name: cleanDisplayName,
           status: enabled ? 1 : 0,
           ...(password ? { password } : {}),
@@ -4168,8 +4184,16 @@ function EditSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('用户名')}</span>
-            <input disabled value={account.username} />
+            <span>{t('映射用户名')}</span>
+            <input
+              autoComplete="off"
+              maxLength={64}
+              minLength={3}
+              onChange={event => setUsername(event.target.value)}
+              pattern="[A-Za-z0-9_.-]{3,64}"
+              required
+              value={username}
+            />
           </label>
           <label>
             <span>{t('显示名')}</span>
@@ -4262,7 +4286,7 @@ function DeleteSubAccountDialog({
         <div className="channel-confirm-body">
           <p>{t('确定删除子账号“{{name}}”吗？删除后无法恢复。', { name: account.display_name || account.username })}</p>
           <div className="channel-confirm-target">
-            <span>{t('用户名')}</span>
+            <span>{t('映射用户名')}</span>
             <strong>{account.username}</strong>
             <code>ID {account.id}</code>
           </div>
@@ -4359,7 +4383,7 @@ function SubAccountsView() {
               <thead>
                 <tr>
                   <th>ID</th>
-                  <th>{t('用户名')}</th>
+                  <th>{t('映射用户名')}</th>
                   <th>{t('显示名')}</th>
                   <th>{t('渠道数')}</th>
                   <th>{t('已用额度')}</th>
