@@ -1864,49 +1864,6 @@ textarea:focus {
   padding: 20px 24px;
 }
 
-.sub-account-usage-query {
-  width: fit-content;
-  margin: 0 0 16px;
-  border-radius: 5px;
-  background: #f0f7ff;
-  padding: 6px 10px;
-  color: #1677ff;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 13px;
-}
-
-.sub-account-usage-totals {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-  margin: 0 0 20px;
-}
-
-.sub-account-usage-totals > div {
-  min-width: 0;
-  border: 1px solid #eaecf0;
-  border-radius: 8px;
-  background: #fafafa;
-  padding: 13px 14px;
-}
-
-.sub-account-usage-totals dt {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.sub-account-usage-totals dd {
-  margin: 6px 0 0;
-  color: #172033;
-  font-size: 21px;
-  font-weight: 700;
-  font-variant-numeric: tabular-nums;
-}
-
-.sub-account-usage-totals > div:first-child dd {
-  color: var(--blue);
-}
-
 .sub-account-usage-category-title {
   margin: 0 0 9px;
   color: #344054;
@@ -2044,12 +2001,6 @@ textarea:focus {
   color: var(--orange);
 }
 
-.sub-account-usage-source {
-  margin: 16px 0 0;
-  color: var(--muted);
-  font-size: 12px;
-}
-
 .sub-account-usage-footer {
   display: flex;
   flex: 0 0 auto;
@@ -2063,14 +2014,6 @@ textarea:focus {
   .sub-account-usage-body {
     padding-right: 16px;
     padding-left: 16px;
-  }
-
-  .sub-account-usage-totals {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .sub-account-usage-totals > div:first-child {
-    grid-column: 1 / -1;
   }
 
   .sub-account-usage-footer {
