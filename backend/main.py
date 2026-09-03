@@ -680,6 +680,42 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             )
             return success_response(request, request_id, sanitize_data(data), cookie)
 
+        sub_account_match = re.fullmatch(r"/api/sub-accounts/(\d+)", path)
+        if sub_account_match and request.method in {"PUT", "DELETE"}:
+            if session["role"] not in {"supplier", "admin"}:
+                raise BackendError(403, "当前账号无权管理子账号")
+            target_id = int(sub_account_match.group(1))
+            if target_id <= 0:
+                raise BackendError(400, "子账号 ID 无效")
+            if request.method == "DELETE":
+                data = await authorized_json(session, path, method="DELETE")
+                return success_response(request, request_id, sanitize_data(data), cookie)
+
+            body = await read_body(request)
+            display_name = body.get("display_name")
+            status = body.get("status")
+            password = body.get("password")
+            display_name = display_name.strip() if isinstance(display_name, str) else ""
+            if not display_name or len(display_name) > 128:
+                raise BackendError(400, "请输入有效的显示名")
+            if isinstance(status, bool):
+                status = int(status)
+            if status not in {0, 1}:
+                raise BackendError(400, "账号状态无效")
+            update_body: dict[str, Any] = {"display_name": display_name, "status": status}
+            if password is not None and password != "":
+                if not isinstance(password, str) or (
+                    len(password) < 8
+                    or len(password) > 4096
+                    or not re.search(r"[A-Za-z]", password)
+                    or not re.search(r"\d", password)
+                    or not re.search(r"[^A-Za-z0-9]", password)
+                ):
+                    raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
+                update_body["password"] = password
+            data = await authorized_json(session, path, method="PUT", body=update_body)
+            return success_response(request, request_id, sanitize_data(data), cookie)
+
         allowed_patterns = READ_PATHS if request.method == "GET" else WRITE_PATHS.get(request.method, ())
         if not any(pattern.fullmatch(path) for pattern in allowed_patterns):
             raise BackendError(404, "接口不存在")

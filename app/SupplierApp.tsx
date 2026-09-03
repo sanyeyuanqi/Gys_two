@@ -22,6 +22,7 @@ import {
   LockKeyhole,
   LogOut,
   Menu,
+  Pencil,
   Plus,
   RefreshCcw,
   Search,
@@ -479,6 +480,22 @@ const englishTranslations: Record<string, string> = {
   '创建子账号': 'Create Sub-account',
   '创建中...': 'Creating...',
   '子账号创建成功': 'Sub-account created successfully',
+  '编辑': 'Edit',
+  '编辑子账号': 'Edit Sub-account',
+  '保存修改': 'Save Changes',
+  '保存中...': 'Saving...',
+  '子账号修改成功': 'Sub-account updated successfully',
+  '编辑子账号失败': 'Failed to update the sub-account',
+  '新密码（可选）': 'New Password (optional)',
+  '留空则不修改密码': 'Leave blank to keep the current password',
+  '启用账号': 'Enable account',
+  '确认删除子账号': 'Delete Sub-account',
+  '确定删除子账号“{{name}}”吗？删除后无法恢复。': 'Delete sub-account “{{name}}”? This action cannot be undone.',
+  '正在删除...': 'Deleting...',
+  '子账号删除成功': 'Sub-account deleted successfully',
+  '删除子账号失败': 'Failed to delete the sub-account',
+  '编辑 {{name}}': 'Edit {{name}}',
+  '删除 {{name}}': 'Delete {{name}}',
   '请输入用户名': 'Enter a username',
   '请输入显示名': 'Enter a display name',
   '登录用户名': 'Login username',
@@ -3949,6 +3966,13 @@ function ModelGapsView() {
   );
 }
 
+function isStrongSubAccountPassword(password: string) {
+  return password.length >= 8
+    && /[A-Za-z]/.test(password)
+    && /\d/.test(password)
+    && /[^A-Za-z0-9]/.test(password);
+}
+
 function CreateSubAccountDialog({
   onClose,
   onCreated,
@@ -3976,12 +4000,7 @@ function CreateSubAccountDialog({
       setError(t('请输入显示名'));
       return;
     }
-    if (
-      password.length < 8
-      || !/[A-Za-z]/.test(password)
-      || !/\d/.test(password)
-      || !/[^A-Za-z0-9]/.test(password)
-    ) {
+    if (!isStrongSubAccountPassword(password)) {
       setError(t('密码至少8位，须含字母、数字和特殊字符'));
       return;
     }
@@ -4086,12 +4105,188 @@ function CreateSubAccountDialog({
   );
 }
 
+function EditSubAccountDialog({
+  account,
+  onClose,
+  onUpdated,
+}: {
+  account: SubAccount;
+  onClose: () => void;
+  onUpdated: () => Promise<void>;
+}) {
+  const { t } = useLanguage();
+  const [displayName, setDisplayName] = useState(account.display_name || account.username);
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [enabled, setEnabled] = useState(account.status === 1);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanDisplayName = displayName.trim();
+    if (!cleanDisplayName) {
+      setError(t('请输入显示名'));
+      return;
+    }
+    if (password && !isStrongSubAccountPassword(password)) {
+      setError(t('密码至少8位，须含字母、数字和特殊字符'));
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await api(`/api/sub-accounts/${account.id}`, {
+        method: 'PUT',
+        body: {
+          display_name: cleanDisplayName,
+          status: enabled ? 1 : 0,
+          ...(password ? { password } : {}),
+        },
+      });
+      await onUpdated();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('编辑子账号失败'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+    >
+      <section aria-labelledby="edit-sub-account-title" aria-modal="true" className="account-dialog sub-account-dialog" role="dialog">
+        <div className="account-dialog-header">
+          <h2 id="edit-sub-account-title">{t('编辑子账号')}</h2>
+          <button aria-label={t('关闭')} disabled={saving} onClick={onClose} type="button"><X size={18} /></button>
+        </div>
+        <form onSubmit={submit}>
+          <label>
+            <span>{t('用户名')}</span>
+            <input disabled value={account.username} />
+          </label>
+          <label>
+            <span>{t('显示名')}</span>
+            <input
+              autoFocus
+              maxLength={128}
+              onChange={event => setDisplayName(event.target.value)}
+              required
+              value={displayName}
+            />
+          </label>
+          <label>
+            <span>{t('新密码（可选）')}</span>
+            <span className="password-input-wrap">
+              <input
+                autoComplete="new-password"
+                maxLength={4096}
+                onChange={event => setPassword(event.target.value)}
+                placeholder={t('留空则不修改密码')}
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+              />
+              <button
+                aria-label={t(showPassword ? '隐藏密码' : '显示密码')}
+                onClick={() => setShowPassword(value => !value)}
+                type="button"
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </span>
+          </label>
+          <label className="sub-account-status-control">
+            <input checked={enabled} onChange={event => setEnabled(event.target.checked)} type="checkbox" />
+            <span>{t('启用账号')}</span>
+          </label>
+          {error && <p className="account-dialog-error" role="alert">{error}</p>}
+          <div className="account-dialog-actions">
+            <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</button>
+            <button className="primary-button compact" disabled={saving} type="submit">
+              {saving && <Loader2 className="spin" size={16} />}
+              {t(saving ? '保存中...' : '保存修改')}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
+function DeleteSubAccountDialog({
+  account,
+  onClose,
+  onDeleted,
+}: {
+  account: SubAccount;
+  onClose: () => void;
+  onDeleted: () => Promise<void>;
+}) {
+  const { t } = useLanguage();
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState('');
+
+  async function remove() {
+    setDeleting(true);
+    setError('');
+    try {
+      await api(`/api/sub-accounts/${account.id}`, { method: 'DELETE' });
+      await onDeleted();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('删除子账号失败'));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div
+      className="dialog-backdrop channel-confirm-backdrop"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !deleting) onClose();
+      }}
+      role="presentation"
+    >
+      <section aria-labelledby="delete-sub-account-title" aria-modal="true" className="channel-confirm-dialog delete" role="dialog">
+        <header className="channel-confirm-header">
+          <span className="channel-confirm-icon" aria-hidden="true"><Trash2 size={19} /></span>
+          <div className="channel-confirm-heading"><h2 id="delete-sub-account-title">{t('确认删除子账号')}</h2></div>
+          <button aria-label={t('关闭')} className="channel-confirm-close" disabled={deleting} onClick={onClose} type="button"><X size={18} /></button>
+        </header>
+        <div className="channel-confirm-body">
+          <p>{t('确定删除子账号“{{name}}”吗？删除后无法恢复。', { name: account.display_name || account.username })}</p>
+          <div className="channel-confirm-target">
+            <span>{t('用户名')}</span>
+            <strong>{account.username}</strong>
+            <code>ID {account.id}</code>
+          </div>
+          {error && <p className="account-dialog-error" role="alert">{error}</p>}
+        </div>
+        <footer className="channel-confirm-footer">
+          <button className="ghost-button" disabled={deleting} onClick={onClose} type="button">{t('取消')}</button>
+          <button className="channel-confirm-submit danger" disabled={deleting} onClick={remove} type="button">
+            {deleting && <Loader2 className="spin" size={15} />}
+            {t(deleting ? '正在删除...' : '删除')}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function SubAccountsView() {
   const { language, t } = useLanguage();
   const [items, setItems] = useState<SubAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState<SubAccount | null>(null);
+  const [deletingAccount, setDeletingAccount] = useState<SubAccount | null>(null);
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
@@ -4117,6 +4312,18 @@ function SubAccountsView() {
     setCreateOpen(false);
     await load(true);
     setNotice({ type: 'ok', text: t('子账号创建成功') });
+  }
+
+  async function handleUpdated() {
+    setEditingAccount(null);
+    await load(true);
+    setNotice({ type: 'ok', text: t('子账号修改成功') });
+  }
+
+  async function handleDeleted() {
+    setDeletingAccount(null);
+    await load(true);
+    setNotice({ type: 'ok', text: t('子账号删除成功') });
   }
 
   return (
@@ -4156,6 +4363,7 @@ function SubAccountsView() {
                   <th>{t('渠道数')}</th>
                   <th>{t('已用额度')}</th>
                   <th>{t('状态')}</th>
+                  <th>{t('操作')}</th>
                 </tr>
               </thead>
               <tbody>
@@ -4169,6 +4377,16 @@ function SubAccountsView() {
                     <td>
                       <Badge tone={item.status === 1 ? 'green' : 'red'}>{statusLabel(item.status, language)}</Badge>
                     </td>
+                    <td>
+                      <div className="sub-account-row-actions">
+                        <button aria-label={t('编辑 {{name}}', { name: item.username })} onClick={() => setEditingAccount(item)} type="button">
+                          <Pencil size={14} />{t('编辑')}
+                        </button>
+                        <button aria-label={t('删除 {{name}}', { name: item.username })} className="danger" onClick={() => setDeletingAccount(item)} type="button">
+                          <Trash2 size={14} />{t('删除')}
+                        </button>
+                      </div>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -4179,6 +4397,8 @@ function SubAccountsView() {
         )}
       </div>
       {createOpen && <CreateSubAccountDialog onClose={() => setCreateOpen(false)} onCreated={handleCreated} />}
+      {editingAccount && <EditSubAccountDialog key={editingAccount.id} account={editingAccount} onClose={() => setEditingAccount(null)} onUpdated={handleUpdated} />}
+      {deletingAccount && <DeleteSubAccountDialog key={deletingAccount.id} account={deletingAccount} onClose={() => setDeletingAccount(null)} onDeleted={handleDeleted} />}
     </section>
   );
 }

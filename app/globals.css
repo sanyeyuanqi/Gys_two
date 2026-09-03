@@ -865,6 +865,26 @@ textarea:focus {
   width: min(100%, 480px);
 }
 
+.account-dialog input:disabled {
+  cursor: not-allowed;
+  background: #f5f7fa;
+  color: #667085;
+}
+
+.account-dialog .sub-account-status-control {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  cursor: pointer;
+}
+
+.account-dialog .sub-account-status-control input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--blue);
+}
+
 .password-input-wrap {
   position: relative;
   display: block;
@@ -1722,7 +1742,53 @@ textarea:focus {
 }
 
 .sub-accounts-table {
-  min-width: 760px;
+  min-width: 900px;
+}
+
+.sub-accounts-table th:last-child,
+.sub-accounts-table td:last-child {
+  position: sticky;
+  right: 0;
+  width: 164px;
+  min-width: 164px;
+  background: #fff;
+  box-shadow: -1px 0 0 var(--line);
+}
+
+.sub-account-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.sub-account-row-actions button {
+  display: inline-flex;
+  height: 30px;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: #fff;
+  color: rgba(0, 0, 0, 0.88);
+  padding: 0 9px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.sub-account-row-actions button:hover {
+  border-color: #4096ff;
+  color: #1677ff;
+}
+
+.sub-account-row-actions button.danger {
+  color: #ff4d4f;
+}
+
+.sub-account-row-actions button.danger:hover {
+  border-color: #ff7875;
+  color: #ff4d4f;
 }
 
 table {
