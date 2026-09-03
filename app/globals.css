@@ -4419,6 +4419,8 @@ body:has(.app-shell .upload-page) {
 }
 
 .dashboard-page {
+  --dashboard-border: #d7dce5;
+  --dashboard-divider: #e0e4eb;
   color: rgba(0, 0, 0, 0.88);
 }
 
@@ -4464,7 +4466,7 @@ body:has(.app-shell .upload-page) {
   min-height: 96px;
   align-items: center;
   gap: 14px;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--dashboard-border);
   border-radius: 8px;
   background: #fff;
   color: inherit;
@@ -4522,7 +4524,7 @@ button.dashboard-stat-card {
 .dashboard-card {
   min-width: 0;
   overflow: hidden;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--dashboard-border);
   border-radius: 8px;
   background: #fff;
 }
@@ -4537,7 +4539,7 @@ button.dashboard-stat-card {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--dashboard-divider);
   padding: 0 24px;
 }
 
@@ -4742,7 +4744,7 @@ button.dashboard-stat-card {
 .dashboard-attention-table th,
 .dashboard-attention-table td {
   height: 40px;
-  border-bottom: 1px solid #f0f0f0;
+  border-bottom: 1px solid var(--dashboard-divider);
   padding: 8px 10px;
   color: rgba(0, 0, 0, 0.88);
   font-size: 13px;
