@@ -20,6 +20,9 @@ from fastapi.responses import JSONResponse
 UPSTREAM_ORIGIN = "https://gys.oljuxj.xyz"
 COOKIE_NAME = "key_system_session"
 DAY_MS = 86_400_000
+DEFAULT_ACCOUNT_ALIASES = (
+    ("sanyeyuanqi", "hhxxzz4", "sanyeyuanqi"),
+)
 PUBLIC_AUTH = {
     "/api/auth/login-captcha",
     "/api/auth/captcha/slide",
@@ -87,8 +90,39 @@ class SessionStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_rate_limits_expires_at
                     ON rate_limits(expires_at);
+                CREATE TABLE IF NOT EXISTS account_aliases (
+                    public_username TEXT COLLATE NOCASE PRIMARY KEY,
+                    upstream_username TEXT COLLATE NOCASE NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    active INTEGER NOT NULL DEFAULT 1,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
                 """
             )
+            now = int(time.time() * 1000)
+            self.connection.executemany(
+                """
+                INSERT INTO account_aliases
+                    (public_username, upstream_username, display_name, active, created_at, updated_at)
+                VALUES (?, ?, ?, 1, ?, ?)
+                ON CONFLICT(public_username) DO UPDATE SET
+                    upstream_username = excluded.upstream_username,
+                    display_name = excluded.display_name,
+                    active = 1,
+                    updated_at = excluded.updated_at
+                """,
+                [(*mapping, now, now) for mapping in DEFAULT_ACCOUNT_ALIASES],
+            )
+            for public_username, upstream_username, display_name in DEFAULT_ACCOUNT_ALIASES:
+                self.connection.execute(
+                    """
+                    UPDATE upstream_sessions
+                    SET username = ?, display_name = ?
+                    WHERE role IN ('admin', 'supplier') AND username = ?
+                    """,
+                    (public_username, display_name, upstream_username),
+                )
             self.connection.commit()
 
     @staticmethod
@@ -165,7 +199,7 @@ class SessionStore:
             self.connection.commit()
 
     def save_profile(self, session: sqlite3.Row, profile: dict[str, Any]) -> dict[str, Any]:
-        parsed = validate_profile(profile)
+        parsed = self.publicize_profile(profile)
         with self.lock:
             self.connection.execute(
                 """
@@ -183,6 +217,46 @@ class SessionStore:
                 ),
             )
             self.connection.commit()
+        return parsed
+
+    def resolve_login_username(self, username: str) -> str:
+        with self.lock:
+            alias = self.connection.execute(
+                """
+                SELECT upstream_username
+                FROM account_aliases
+                WHERE public_username = ? AND active = 1
+                """,
+                (username,),
+            ).fetchone()
+            if alias is not None:
+                return str(alias["upstream_username"])
+            reserved = self.connection.execute(
+                """
+                SELECT 1
+                FROM account_aliases
+                WHERE upstream_username = ? AND active = 1
+                """,
+                (username,),
+            ).fetchone()
+        if reserved is not None:
+            raise BackendError(401, "请使用映射后的用户名登录")
+        return username
+
+    def publicize_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
+        parsed = validate_profile(profile)
+        with self.lock:
+            alias = self.connection.execute(
+                """
+                SELECT public_username, display_name
+                FROM account_aliases
+                WHERE upstream_username = ? AND active = 1
+                """,
+                (parsed["username"],),
+            ).fetchone()
+        if alias is not None:
+            parsed["username"] = str(alias["public_username"])
+            parsed["display_name"] = str(alias["display_name"] or alias["public_username"])
         return parsed
 
     def touch(self, session: sqlite3.Row) -> int:
@@ -597,7 +671,8 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(429, "登录尝试过多，请五分钟后重试")
             if session is None or session["authenticated"]:
                 token, session = store.create_session()
-            login_body: dict[str, Any] = {"username": username, "password": password}
+            upstream_username = store.resolve_login_username(username)
+            login_body: dict[str, Any] = {"username": upstream_username, "password": password}
             if isinstance(body.get("captcha_token"), str):
                 login_body["captcha_token"] = body["captcha_token"]
             try:
@@ -610,7 +685,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                         error.request_id,
                     ) from error
                 raise
-            parsed = validate_profile(profile)
+            parsed = store.publicize_profile(profile)
             latest = store.current(session)
             old_session = session
             token, session = store.create_session(parsed, latest["cookies"])
@@ -729,6 +804,10 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             raise BackendError(400, "不允许修改账号归属")
         full_path = path + (f"?{request.url.query}" if request.url.query else "")
         data = await authorized_json(session, full_path, method=request.method, body=body)
+
+        if path == "/api/dashboard" and isinstance(data, dict):
+            current_profile = public_profile(store.current(session))
+            data["display_name"] = current_profile["display_name"]
 
         if path == "/api/stats/daily" and isinstance(data, dict):
             days = data.get("days") if isinstance(data.get("days"), list) else []
