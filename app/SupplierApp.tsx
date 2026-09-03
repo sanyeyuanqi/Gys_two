@@ -500,11 +500,27 @@ const englishTranslations: Record<string, string> = {
   '当前账号无权限管理子账号': 'This account cannot manage sub-accounts',
   '管理子账号及其平台消耗。': 'Manage sub-accounts and platform usage.',
   '正在检查权限': 'Checking permissions',
+  '新增子账号': 'Add Sub-account',
+  '创建子账号': 'Create Sub-account',
+  '创建中...': 'Creating...',
+  '子账号创建成功': 'Sub-account created successfully',
+  '请输入用户名': 'Enter a username',
+  '请输入显示名': 'Enter a display name',
+  '登录用户名': 'Login username',
+  '显示名称': 'Display name',
+  '密码': 'Password',
+  '确认密码': 'Confirm Password',
+  '两次输入的密码不一致': 'The passwords do not match',
+  '密码至少8位，须含字母、数字和特殊字符': 'Use at least 8 characters with a letter, number, and special character',
+  '显示密码': 'Show password',
+  '隐藏密码': 'Hide password',
   '用户名': 'Username',
   '显示名': 'Display Name',
   '渠道数': 'Channels',
   '不可管理子账号': 'Sub-account Management Unavailable',
   '当前账号没有管理子账号的权限。': 'This account cannot manage sub-accounts.',
+  '暂无子账号': 'No Sub-accounts',
+  '点击“新增子账号”创建第一个子账号。': 'Click “Add Sub-account” to create the first sub-account.',
   '新 API Key': 'New API Key',
   '加载 API Key 失败': 'Failed to load API keys',
   '创建成功：{{key}}': 'Created successfully: {{key}}',
@@ -4066,12 +4082,177 @@ function SubAccountUsageDialog({
   );
 }
 
+function CreateSubAccountDialog({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: () => Promise<void>;
+}) {
+  const { t } = useLanguage();
+  const [username, setUsername] = useState('');
+  const [displayName, setDisplayName] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const cleanUsername = username.trim();
+    const cleanDisplayName = displayName.trim();
+    if (!cleanUsername) {
+      setError(t('请输入用户名'));
+      return;
+    }
+    if (!cleanDisplayName) {
+      setError(t('请输入显示名'));
+      return;
+    }
+    if (
+      password.length < 8
+      || !/[A-Za-z]/.test(password)
+      || !/\d/.test(password)
+      || !/[^A-Za-z0-9]/.test(password)
+    ) {
+      setError(t('密码至少8位，须含字母、数字和特殊字符'));
+      return;
+    }
+    if (password !== confirmPassword) {
+      setError(t('两次输入的密码不一致'));
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await api('/api/sub-accounts', {
+        method: 'POST',
+        body: {
+          username: cleanUsername,
+          display_name: cleanDisplayName,
+          password,
+        },
+      });
+      await onCreated();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('创建失败'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="dialog-backdrop"
+      role="presentation"
+      onMouseDown={event => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+    >
+      <section
+        aria-labelledby="create-sub-account-title"
+        aria-modal="true"
+        className="account-dialog sub-account-dialog"
+        role="dialog"
+      >
+        <div className="account-dialog-header">
+          <h2 id="create-sub-account-title">{t('新增子账号')}</h2>
+          <button aria-label={t('关闭')} disabled={saving} onClick={onClose} type="button">
+            <X size={18} />
+          </button>
+        </div>
+        <form onSubmit={submit}>
+          <label>
+            <span>{t('用户名')}</span>
+            <input
+              autoComplete="off"
+              autoFocus
+              maxLength={128}
+              onChange={event => setUsername(event.target.value)}
+              placeholder={t('登录用户名')}
+              required
+              value={username}
+            />
+          </label>
+          <label>
+            <span>{t('显示名')}</span>
+            <input
+              autoComplete="off"
+              maxLength={128}
+              onChange={event => setDisplayName(event.target.value)}
+              placeholder={t('显示名称')}
+              required
+              value={displayName}
+            />
+          </label>
+          <label>
+            <span>{t('密码')}</span>
+            <span className="password-input-wrap">
+              <input
+                autoComplete="new-password"
+                maxLength={4096}
+                minLength={8}
+                onChange={event => setPassword(event.target.value)}
+                placeholder={t('密码至少8位，须含字母、数字和特殊字符')}
+                required
+                type={showPassword ? 'text' : 'password'}
+                value={password}
+              />
+              <button
+                aria-label={t(showPassword ? '隐藏密码' : '显示密码')}
+                onClick={() => setShowPassword(value => !value)}
+                type="button"
+              >
+                {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </span>
+          </label>
+          <label>
+            <span>{t('确认密码')}</span>
+            <span className="password-input-wrap">
+              <input
+                autoComplete="new-password"
+                maxLength={4096}
+                minLength={8}
+                onChange={event => setConfirmPassword(event.target.value)}
+                required
+                type={showConfirmPassword ? 'text' : 'password'}
+                value={confirmPassword}
+              />
+              <button
+                aria-label={t(showConfirmPassword ? '隐藏密码' : '显示密码')}
+                onClick={() => setShowConfirmPassword(value => !value)}
+                type="button"
+              >
+                {showConfirmPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+              </button>
+            </span>
+          </label>
+          {error && <p className="account-dialog-error" role="alert">{error}</p>}
+          <div className="account-dialog-actions">
+            <button className="ghost-button" disabled={saving} onClick={onClose} type="button">
+              {t('取消')}
+            </button>
+            <button className="primary-button compact" disabled={saving} type="submit">
+              {saving && <Loader2 className="spin" size={16} />}
+              {t(saving ? '创建中...' : '创建子账号')}
+            </button>
+          </div>
+        </form>
+      </section>
+    </div>
+  );
+}
+
 function SubAccountsView() {
   const { language, t } = useLanguage();
   const [items, setItems] = useState<SubAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [usageAccount, setUsageAccount] = useState<SubAccount | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
@@ -4093,6 +4274,12 @@ function SubAccountsView() {
     load();
   }, [load]);
 
+  async function handleCreated() {
+    setCreateOpen(false);
+    await load(true);
+    setNotice({ type: 'ok', text: t('子账号创建成功') });
+  }
+
   return (
     <section>
       <PageHeading
@@ -4100,10 +4287,16 @@ function SubAccountsView() {
         title={t('子账号管理')}
         subtitle={t('管理子账号及其平台消耗。')}
         action={
-          <button className="primary-button compact" onClick={() => load(true)} type="button">
-            <RefreshCcw size={17} />
-            {t('刷新')}
-          </button>
+          <div className="action-row">
+            <button className="ghost-button compact" onClick={() => load(true)} type="button">
+              <RefreshCcw size={17} />
+              {t('刷新')}
+            </button>
+            <button className="primary-button compact" onClick={() => setCreateOpen(true)} type="button">
+              <Plus size={17} />
+              {t('新增子账号')}
+            </button>
+          </div>
         }
       />
       <NoticeBanner notice={notice} />
@@ -4149,10 +4342,11 @@ function SubAccountsView() {
             </table>
           </div>
         ) : (
-          <EmptyState title={t('不可管理子账号')} description={t('当前账号没有管理子账号的权限。')} />
+          <EmptyState title={t('暂无子账号')} description={t('点击“新增子账号”创建第一个子账号。')} />
         )}
       </div>
       {usageAccount && <SubAccountUsageDialog key={usageAccount.id} account={usageAccount} onClose={() => setUsageAccount(null)} />}
+      {createOpen && <CreateSubAccountDialog onClose={() => setCreateOpen(false)} onCreated={handleCreated} />}
     </section>
   );
 }

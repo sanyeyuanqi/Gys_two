@@ -743,6 +743,36 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             data = await authorized_json(session, path, method="POST", body=body)
             return success_response(request, request_id, sanitize_data(data), cookie)
 
+        if path == "/api/sub-accounts" and request.method == "POST":
+            if session["role"] not in {"supplier", "admin"}:
+                raise BackendError(403, "当前账号无权管理子账号")
+            body = await read_body(request)
+            username = body.get("username")
+            display_name = body.get("display_name")
+            password = body.get("password")
+            username = username.strip() if isinstance(username, str) else ""
+            display_name = display_name.strip() if isinstance(display_name, str) else ""
+            password = password if isinstance(password, str) else ""
+            if not username or len(username) > 128:
+                raise BackendError(400, "请输入有效的用户名")
+            if not display_name or len(display_name) > 128:
+                raise BackendError(400, "请输入有效的显示名")
+            if (
+                len(password) < 8
+                or len(password) > 4096
+                or not re.search(r"[A-Za-z]", password)
+                or not re.search(r"\d", password)
+                or not re.search(r"[^A-Za-z0-9]", password)
+            ):
+                raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
+            data = await authorized_json(
+                session,
+                path,
+                method="POST",
+                body={"username": username, "display_name": display_name, "password": password},
+            )
+            return success_response(request, request_id, sanitize_data(data), cookie)
+
         usage_match = re.fullmatch(r"/api/sub-accounts/(\d+)/platform-usage", path)
         if usage_match and request.method == "GET":
             if session["role"] not in {"supplier", "admin"}:

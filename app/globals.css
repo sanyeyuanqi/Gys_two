@@ -861,6 +861,39 @@ textarea:focus {
   width: auto;
 }
 
+.sub-account-dialog {
+  width: min(100%, 480px);
+}
+
+.password-input-wrap {
+  position: relative;
+  display: block;
+}
+
+.account-dialog .password-input-wrap input {
+  padding-right: 42px;
+}
+
+.account-dialog .password-input-wrap button {
+  position: absolute;
+  top: 50%;
+  right: 7px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  translate: 0 -50%;
+  place-items: center;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #667085;
+  cursor: pointer;
+}
+
+.account-dialog .password-input-wrap button:hover {
+  background: #f2f4f7;
+}
+
 .daily-stats-page {
   width: 100%;
 }
