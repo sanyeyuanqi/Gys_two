@@ -742,8 +742,6 @@ async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[st
     channels: list[dict[str, Any]] = []
 
     for tag in matching_tags:
-        match = tag_pattern.fullmatch(tag)
-        tag_category = match.group("category").lower() if match else ""
         page = 1
         loaded = 0
         while True:
@@ -770,7 +768,9 @@ async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[st
                 if channel_id in seen_channel_ids:
                     continue
                 seen_channel_ids.add(channel_id)
-                category = str(channel.get("category") or tag_category).strip().lower()
+                category = str(channel.get("category") or "").strip().lower()
+                if not category:
+                    raise BackendError(502, "原站渠道记录缺少渠道分类，无法准确统计")
                 channels.append(
                     {
                         "id": channel_id,

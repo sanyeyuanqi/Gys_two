@@ -285,7 +285,8 @@ const englishTranslations: Record<string, string> = {
   '渠道记录': 'Channel Records',
   '请求记录': 'Requests',
   '全部分类': 'All Categories',
-  '分类模型消耗': 'Model Usage by Category',
+  '渠道分类模型消耗': 'Model Usage by Channel Category',
+  '渠道分类': 'Channel Category',
   '涉及分类': 'Categories',
   '未归属模型': 'Unattributed Model',
   '该分类暂无模型消耗': 'No model usage in this category',
@@ -296,7 +297,7 @@ const englishTranslations: Record<string, string> = {
   '正在按分类读取全部模型消耗': 'Loading model usage by category',
   '该用户暂无匹配标签的渠道消耗': 'No channel usage matches this user’s tags',
   '子账号列表额度为 {{amount}}，与标签查询合计不同。': 'The sub-account list shows {{amount}}, which differs from the tag-based total.',
-  '统计口径：按标签前缀 {{prefix}}* 查询渠道，再读取渠道消费日志，并按分类和实际模型汇总累计消耗。': 'Source: channels matching {{prefix}}*, with usage logs grouped by category and actual model.',
+  '统计口径：标签前缀 {{prefix}}* 仅用于定位用户渠道；分类以原站渠道记录为准，再按实际模型汇总消费日志。': 'Source: the {{prefix}}* tag prefix only locates user channels; categories come from the original channel records, with usage logs grouped by actual model.',
   '状态': 'Status',
   '分类': 'Category',
   '备注': 'Note',
@@ -772,6 +773,23 @@ const uploadCategoryCards: Array<{
   { key: 'openrouter', name: 'OpenRouter', provider: 'OpenRouter Claude', color: '#6467f2', categories: ['openrouter'] },
   { key: 'opencode', name: 'OpenCode', provider: 'OpenCode Claude', color: '#111827', categories: ['opencode'] },
   { key: 'cloudflare', name: 'Cloudflare', provider: 'Cloudflare Claude', color: '#f6821f', categories: ['cloudflare'] },
+];
+
+const channelUsageCategories = [
+  'aws',
+  'aws_a',
+  'anthropic',
+  'anthropic_small',
+  'anthropic_test',
+  'anthropic_ent',
+  'openai',
+  'azure',
+  'azure_claude',
+  'ai_studio',
+  'vertexai',
+  'vertexai_claude',
+  'openrouter',
+  'opencode',
 ];
 
 const uploadCategoryVariants: Record<string, string> = {
@@ -4046,49 +4064,32 @@ function SubAccountUsageDialog({
   const [summary, setSummary] = useState<SubAccountUsageSummary | null>(null);
   const [error, setError] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
-  const categoryCards = useMemo(() => uploadCategoryCards.map((card) => ({
-    ...card,
-    amount: (summary?.categories || [])
-      .filter((item) => card.categories.includes(item.category))
-      .reduce((total, item) => total + Number(item.amount || 0), 0),
-  })), [summary]);
-  const selectedCategoryCard = categoryCards.find((card) => card.key === categoryFilter);
-  const selectedCategoryStats = (summary?.categories || []).filter((item) => (
-    selectedCategoryCard?.categories.includes(item.category)
-  ));
+  const categoryOptions = useMemo(() => channelUsageCategories.map((category) => ({
+    key: category,
+    name: categoryLabel(category, language),
+    color: dashboardCategoryColor(category),
+    stats: summary?.categories.find((item) => item.category === category),
+  })), [language, summary]);
+  const selectedCategory = categoryOptions.find((category) => category.key === categoryFilter);
   const visibleRows = useMemo(() => {
-    if (!summary || !selectedCategoryCard) return summary?.rows || [];
-    const grouped = new Map<string, SubAccountUsageSummary['rows'][number]>();
-    summary.rows
-      .filter((row) => selectedCategoryCard.categories.includes(row.category))
-      .forEach((row) => {
-        const current = grouped.get(row.model);
-        if (current) {
-          current.channelCount += row.channelCount;
-          current.tagCount += row.tagCount;
-          current.requestCount += row.requestCount;
-          current.amount = (Number(current.amount) + Number(row.amount)).toFixed(4);
-        } else {
-          grouped.set(row.model, { ...row, category: selectedCategoryCard.key });
-        }
-      });
-    const categoryTotal = selectedCategoryCard.amount;
-    return Array.from(grouped.values())
+    if (!summary || !selectedCategory) return summary?.rows || [];
+    const categoryTotal = Number(selectedCategory.stats?.amount || 0);
+    return summary.rows
+      .filter((row) => row.category === selectedCategory.key)
       .map((row) => ({
         ...row,
         sharePercent: categoryTotal > 0
           ? (Number(row.amount) / categoryTotal * 100).toFixed(2)
           : '0.00',
-      }))
-      .sort((left, right) => Number(right.amount) - Number(left.amount));
-  }, [selectedCategoryCard, summary]);
-  const displayedStats = selectedCategoryCard ? {
-    amount: selectedCategoryCard.amount.toFixed(4),
-    platformCount: selectedCategoryStats.length ? 1 : 0,
-    modelCount: visibleRows.length,
-    tagCount: selectedCategoryStats.reduce((total, item) => total + item.tagCount, 0),
-    channelCount: selectedCategoryStats.reduce((total, item) => total + item.channelCount, 0),
-    requestCount: selectedCategoryStats.reduce((total, item) => total + item.requestCount, 0),
+      }));
+  }, [selectedCategory, summary]);
+  const displayedStats = selectedCategory ? {
+    amount: selectedCategory.stats?.amount || '0.0000',
+    platformCount: selectedCategory.stats ? 1 : 0,
+    modelCount: selectedCategory.stats?.modelCount || 0,
+    tagCount: selectedCategory.stats?.tagCount || 0,
+    channelCount: selectedCategory.stats?.channelCount || 0,
+    requestCount: selectedCategory.stats?.requestCount || 0,
   } : {
     amount: summary?.totalAmount || '0.0000',
     platformCount: summary?.platformCount || 0,
@@ -4110,10 +4111,10 @@ function SubAccountUsageDialog({
       .then((value) => {
         if (!controller.signal.aborted) {
           setSummary(value);
-          const firstUsedCategory = uploadCategoryCards.find((card) => (
-            value.categories.some((item) => card.categories.includes(item.category) && item.channelCount > 0)
+          const firstUsedCategory = channelUsageCategories.find((category) => (
+            value.categories.some((item) => item.category === category && item.channelCount > 0)
           ));
-          setCategoryFilter(firstUsedCategory?.key || 'all');
+          setCategoryFilter(firstUsedCategory || 'all');
         }
       })
       .catch((failure) => {
@@ -4143,7 +4144,7 @@ function SubAccountUsageDialog({
       >
         <header className="sub-account-usage-header">
           <div>
-            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('分类模型消耗')}</h2>
+            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('渠道分类模型消耗')}</h2>
             <p>{account.display_name || account.username} · {t('本站用户名')} {account.username} · ID {account.id}</p>
           </div>
           <div className="sub-account-usage-tools">
@@ -4190,7 +4191,8 @@ function SubAccountUsageDialog({
                   text: t('子账号列表额度为 {{amount}}，与标签查询合计不同。', { amount: `$${summary.listedAmount}` }),
                 }} />
               )}
-              <div className="sub-account-usage-categories" aria-label={t('分类')} role="group">
+              <p className="sub-account-usage-category-title">{t('渠道分类')}</p>
+              <div className="sub-account-usage-categories" aria-label={t('渠道分类')} role="group">
                 <button
                   className={categoryFilter === 'all' ? 'active' : ''}
                   onClick={() => setCategoryFilter('all')}
@@ -4200,17 +4202,17 @@ function SubAccountUsageDialog({
                   <strong>{t('全部分类')}</strong>
                   <small>${summary.totalAmount}</small>
                 </button>
-                {categoryCards.map((card) => (
+                {categoryOptions.map((category) => (
                   <button
-                    className={categoryFilter === card.key ? 'active' : ''}
-                    key={card.key}
-                    onClick={() => setCategoryFilter(card.key)}
-                    style={{ '--category-color': card.color } as CSSProperties}
+                    className={categoryFilter === category.key ? 'active' : ''}
+                    key={category.key}
+                    onClick={() => setCategoryFilter(category.key)}
+                    style={{ '--category-color': category.color } as CSSProperties}
                     type="button"
                   >
-                    <span className="sub-account-usage-category-letter">{card.name[0]}</span>
-                    <strong>{card.name}</strong>
-                    <small>${card.amount.toFixed(4)}</small>
+                    <span className="sub-account-usage-category-letter">{category.name[0]}</span>
+                    <strong>{category.name}</strong>
+                    <small>{category.key} · ${category.stats?.amount || '0.0000'}</small>
                   </button>
                 ))}
               </div>
@@ -4219,7 +4221,7 @@ function SubAccountUsageDialog({
                   <table className="sub-account-usage-table">
                     <thead>
                       <tr>
-                        <th>{t('分类')}</th>
+                        <th>{t('渠道分类')}</th>
                         <th>{t('模型')}</th>
                         <th>{t('匹配标签')}</th>
                         <th>{t('渠道记录')}</th>
@@ -4231,7 +4233,7 @@ function SubAccountUsageDialog({
                     <tbody>
                       {visibleRows.map((row) => (
                         <tr key={`${row.category}-${row.model}`}>
-                          <td>{selectedCategoryCard?.name || (row.category ? categoryLabel(row.category, language) : '-')}</td>
+                          <td>{row.category ? categoryLabel(row.category, language) : '-'}</td>
                           <td><code>{row.model || t('未归属模型')}</code></td>
                           <td>{formatInteger(row.tagCount)}</td>
                           <td>{formatInteger(row.channelCount)}</td>
@@ -4255,7 +4257,7 @@ function SubAccountUsageDialog({
                 </div>
               )}
               <p className="sub-account-usage-source">
-                {t('统计口径：按标签前缀 {{prefix}}* 查询渠道，再读取渠道消费日志，并按分类和实际模型汇总累计消耗。', { prefix: summary.queryPrefix })}
+                {t('统计口径：标签前缀 {{prefix}}* 仅用于定位用户渠道；分类以原站渠道记录为准，再按实际模型汇总消费日志。', { prefix: summary.queryPrefix })}
               </p>
             </>
           )}

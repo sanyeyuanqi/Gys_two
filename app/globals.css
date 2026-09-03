@@ -1907,9 +1907,16 @@ textarea:focus {
   color: var(--blue);
 }
 
+.sub-account-usage-category-title {
+  margin: 0 0 9px;
+  color: #344054;
+  font-size: 13px;
+  font-weight: 750;
+}
+
 .sub-account-usage-categories {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
   gap: 9px;
   margin: 0 0 20px;
 }
