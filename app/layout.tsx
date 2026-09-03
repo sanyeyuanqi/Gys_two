@@ -2,9 +2,12 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'GYS 供应商管理系统',
-  description: '供应商 API 密钥、渠道、用量和子账号的一站式管理后台。',
-  icons: { icon: '/favicon.svg' },
+  title: '上 Key 系统',
+  description: '使用原站账号登录的 API Key 上传与消耗管理系统。',
+  icons: {
+    icon: [{ url: '/favicon.svg?v=2', type: 'image/svg+xml' }],
+    shortcut: '/favicon.svg?v=2',
+  },
 };
 
 export default function RootLayout({

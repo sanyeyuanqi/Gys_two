@@ -31,6 +31,8 @@
     "coverage/**",
     "components/ui/**",
     "hooks/**",
+    "app/SupplierApp.tsx",
+    "app/LoginCaptcha.tsx",
     "next-env.d.ts"
   ],
   "rules": {
