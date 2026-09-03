@@ -1,5 +1,5 @@
-import { handleApi } from '@/server/backend';
+import { proxyFastApi } from '@/server/fastapi-proxy';
 
 export const dynamic = 'force-dynamic';
-export const GET = handleApi;
-export const POST = handleApi;
+export const GET = proxyFastApi;
+export const POST = proxyFastApi;
