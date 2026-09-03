@@ -498,10 +498,10 @@ const englishTranslations: Record<string, string> = {
   '编辑 {{name}}': 'Edit {{name}}',
   '删除 {{name}}': 'Delete {{name}}',
   '请输入用户名': 'Enter a username',
-  '映射用户名': 'Mapped Username',
-  '原始用户名': 'Original Username',
-  '登录用户名（映射）': 'Login username (mapped)',
-  '映射用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
+  '本站用户名': 'Site Username',
+  'GYS用户名': 'GYS Username',
+  '本站登录用户名': 'Username for this site',
+  '本站用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
   '请输入显示名': 'Enter a display name',
   '登录用户名': 'Login username',
   '显示名称': 'Display name',
@@ -4003,7 +4003,7 @@ function CreateSubAccountDialog({
       return;
     }
     if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
-      setError(t('映射用户名须为3至64位字母、数字、点、横线或下划线'));
+      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
       return;
     }
     if (!cleanDisplayName) {
@@ -4055,7 +4055,7 @@ function CreateSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('映射用户名')}</span>
+            <span>{t('本站用户名')}</span>
             <input
               autoComplete="off"
               autoFocus
@@ -4063,7 +4063,7 @@ function CreateSubAccountDialog({
               minLength={3}
               onChange={event => setUsername(event.target.value)}
               pattern="[A-Za-z0-9_.-]{3,64}"
-              placeholder={t('登录用户名（映射）')}
+              placeholder={t('本站登录用户名')}
               required
               value={username}
             />
@@ -4140,7 +4140,7 @@ function EditSubAccountDialog({
     const cleanUsername = username.trim();
     const cleanDisplayName = displayName.trim();
     if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
-      setError(t('映射用户名须为3至64位字母、数字、点、横线或下划线'));
+      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
       return;
     }
     if (!cleanDisplayName) {
@@ -4186,11 +4186,7 @@ function EditSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('原始用户名')}</span>
-            <input disabled value={account.original_username || '-'} />
-          </label>
-          <label>
-            <span>{t('映射用户名')}</span>
+            <span>{t('本站用户名')}</span>
             <input
               autoComplete="off"
               maxLength={64}
@@ -4200,6 +4196,10 @@ function EditSubAccountDialog({
               required
               value={username}
             />
+          </label>
+          <label>
+            <span>{t('GYS用户名')}</span>
+            <input disabled value={account.original_username || '-'} />
           </label>
           <label>
             <span>{t('显示名')}</span>
@@ -4292,7 +4292,7 @@ function DeleteSubAccountDialog({
         <div className="channel-confirm-body">
           <p>{t('确定删除子账号“{{name}}”吗？删除后无法恢复。', { name: account.display_name || account.username })}</p>
           <div className="channel-confirm-target">
-            <span>{t('映射用户名')}</span>
+            <span>{t('本站用户名')}</span>
             <strong>{account.username}</strong>
             <code>ID {account.id}</code>
           </div>
@@ -4389,8 +4389,8 @@ function SubAccountsView() {
               <thead>
                 <tr>
                   <th>ID</th>
-                  <th>{t('原始用户名')}</th>
-                  <th>{t('映射用户名')}</th>
+                  <th>{t('本站用户名')}</th>
+                  <th>{t('GYS用户名')}</th>
                   <th>{t('显示名')}</th>
                   <th>{t('渠道数')}</th>
                   <th>{t('已用额度')}</th>
@@ -4402,8 +4402,8 @@ function SubAccountsView() {
                 {items.map((item) => (
                   <tr key={item.id}>
                     <td>{item.id}</td>
-                    <td>{item.original_username || '-'}</td>
                     <td>{item.username}</td>
+                    <td>{item.original_username || '-'}</td>
                     <td>{item.display_name || '-'}</td>
                     <td>{item.channel_count || 0}</td>
                     <td>{formatQuota(item.used_quota)}</td>

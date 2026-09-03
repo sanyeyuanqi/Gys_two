@@ -295,7 +295,7 @@ class SessionStore:
                 (public_username, upstream_username),
             ).fetchone()
             if conflict is not None:
-                raise BackendError(409, "映射用户名已存在")
+                raise BackendError(409, "本站用户名已存在")
             self.connection.execute(
                 "DELETE FROM account_aliases WHERE active = 0 AND public_username = ?",
                 (public_username,),
@@ -441,7 +441,7 @@ class SessionStore:
                 (public_username, current["public_username"]),
             ).fetchone()
             if conflict is not None:
-                raise BackendError(409, "映射用户名已存在")
+                raise BackendError(409, "本站用户名已存在")
             self.connection.execute(
                 """
                 UPDATE account_aliases
@@ -480,7 +480,7 @@ class SessionStore:
                 (public_username, current["public_username"]),
             ).fetchone()
         if conflict is not None:
-            raise BackendError(409, "映射用户名已存在")
+            raise BackendError(409, "本站用户名已存在")
 
     def delete_sub_account_alias(self, upstream_user_id: int) -> None:
         with self.lock:
@@ -978,7 +978,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             display_name = display_name.strip() if isinstance(display_name, str) else ""
             password = password if isinstance(password, str) else ""
             if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
-                raise BackendError(400, "映射用户名须为3至64位字母、数字、点、横线或下划线")
+                raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
                 raise BackendError(400, "请输入有效的显示名")
             if (
@@ -1040,7 +1040,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             username = username.strip() if isinstance(username, str) else ""
             display_name = display_name.strip() if isinstance(display_name, str) else ""
             if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
-                raise BackendError(400, "映射用户名须为3至64位字母、数字、点、横线或下划线")
+                raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
                 raise BackendError(400, "请输入有效的显示名")
             if isinstance(status, bool):
