@@ -953,13 +953,6 @@ function takeAuthMessage() {
   }
 }
 
-function roleLabel(role?: string, language: Language = 'zh') {
-  if (role === 'admin') return language === 'en' ? 'Administrator' : '管理员';
-  if (role === 'supplier') return language === 'en' ? 'Supplier' : '供应商';
-  if (role === 'sub') return language === 'en' ? 'Sub-account' : '子账号';
-  return role || (language === 'en' ? 'User' : '用户');
-}
-
 function statusLabel(status?: number, language: Language = 'zh') {
   if (status === 1) return language === 'en' ? 'Enabled' : '启用';
   if (status === 2) return language === 'en' ? 'Disabled' : '禁用';
@@ -1036,21 +1029,6 @@ function buildUploadTagPreview(userId: number, category: string, timestamp: numb
 function viewFromPath(pathname: string): ViewKey {
   const key = pathname.replace(/^\/+/, '').split('/')[0] as ViewKey;
   return navItems.some((item) => item.key === key) ? key : 'dashboard';
-}
-
-function greeting(language: Language = 'zh') {
-  const hour = new Date().getHours();
-  if (language === 'en') {
-    if (hour < 6) return 'Good evening';
-    if (hour < 12) return 'Good morning';
-    if (hour < 18) return 'Good afternoon';
-    return 'Good evening';
-  }
-  if (hour < 6) return '夜深了';
-  if (hour < 12) return '上午好';
-  if (hour < 14) return '中午好';
-  if (hour < 18) return '下午好';
-  return '晚上好';
 }
 
 function readCachedUser(): UserProfile | null {
@@ -1701,27 +1679,12 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const channels = data?.channels || {};
-  const role = data?.role;
   const healthRate = channels.avg_sr;
   const healthPercent = healthRate == null || healthRate < 0
     ? 0
     : Math.min(100, Math.round(healthRate * 1000) / 10);
   const healthColor = dashboardHealthColor(healthRate);
   const notScored = Math.max(0, (channels.total || 0) - (channels.scored || 0));
-  const shortcuts: Array<{
-    color: string;
-    icon: ComponentType<{ size?: number; color?: string }>;
-    label: string;
-    view: ViewKey;
-  }> = [
-    { icon: UploadCloud, label: '上传密钥', view: 'upload', color: '#1677ff' },
-    { icon: FileKey2, label: '我的渠道', view: 'my-channels', color: '#13c2c2' },
-    ...(role === 'supplier'
-      ? [{ icon: Users, label: '子账号管理', view: 'sub-accounts' as ViewKey, color: '#722ed1' }]
-      : []),
-    { icon: BarChart3, label: '消费快照', view: 'daily-stats', color: '#fa8c16' },
-  ];
-
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
     setNotice(null);
@@ -1745,30 +1708,6 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
   return (
     <section className="dashboard-page">
       <NoticeBanner notice={notice} />
-      <div className="dashboard-hero">
-        <div>
-          <h1>
-            {data
-              ? `${greeting(language)}${language === 'en' ? ', ' : '，'}${data.display_name || t('欢迎回来')}`
-              : t('欢迎回来')}
-          </h1>
-          <p>
-            {data
-              ? `${roleLabel(role, language)} ${t('控制台')} · ${new Date().toLocaleDateString(language === 'en' ? 'en-US' : 'zh-CN', {
-                year: 'numeric',
-                month: 'long',
-                day: 'numeric',
-                weekday: 'long',
-              })}`
-              : t('正在加载控制台')}
-          </p>
-        </div>
-        <button className="dashboard-hero-button" onClick={() => setView('upload')} type="button">
-          <UploadCloud size={16} />
-          {t('上传密钥')}
-        </button>
-      </div>
-
       {loading ? (
         <div className="dashboard-skeleton" aria-label={t('正在加载控制台')}>
           {Array.from({ length: 8 }, (_, index) => <span key={index} />)}
@@ -1891,20 +1830,6 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
             </div>
           </article>
 
-          <article className="dashboard-card dashboard-shortcuts-card">
-            <header className="dashboard-card-header"><h2>{t('快捷入口')}</h2></header>
-            <div className={`dashboard-shortcut-grid dashboard-shortcut-grid-${shortcuts.length}`}>
-              {shortcuts.map((shortcut) => {
-                const Icon = shortcut.icon;
-                return (
-                  <button key={shortcut.view} onClick={() => setView(shortcut.view)} type="button">
-                    <Icon color={shortcut.color} size={27} />
-                    <span>{t(shortcut.label)}</span>
-                  </button>
-                );
-              })}
-            </div>
-          </article>
         </>
       )}
     </section>
