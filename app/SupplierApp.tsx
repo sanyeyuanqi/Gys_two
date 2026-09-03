@@ -4013,17 +4013,13 @@ function SubAccountUsageDialog({
     setLoading(true);
     setSummary(null);
     setError('');
-    api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage`, {
+    api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage?category=${encodeURIComponent(categoryFilter)}`, {
       fresh: true,
       signal: controller.signal,
     })
       .then((value) => {
         if (!controller.signal.aborted) {
           setSummary(value);
-          const firstUsedCategory = channelUsageCategories.find((category) => (
-            value.categories.some((item) => item.category === category && item.channelCount > 0)
-          ));
-          setCategoryFilter(firstUsedCategory || channelUsageCategories[0]);
         }
       })
       .catch((failure) => {
@@ -4035,7 +4031,7 @@ function SubAccountUsageDialog({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [account.id, attempt, t]);
+  }, [account.id, attempt, categoryFilter, t]);
 
   return (
     <div
@@ -4097,7 +4093,7 @@ function SubAccountUsageDialog({
                   >
                     <span className="sub-account-usage-category-letter">{category.name[0]}</span>
                     <strong>{category.name}</strong>
-                    <small>{category.key} · ${category.stats?.amount || '0.0000'}</small>
+                    <small>{account.id}-{category.key}</small>
                   </button>
                 ))}
               </div>
