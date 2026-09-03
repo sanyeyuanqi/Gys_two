@@ -1742,15 +1742,15 @@ textarea:focus {
 }
 
 .sub-accounts-table {
-  min-width: 1040px;
+  min-width: 1160px;
 }
 
 .sub-accounts-table th:last-child,
 .sub-accounts-table td:last-child {
   position: sticky;
   right: 0;
-  width: 164px;
-  min-width: 164px;
+  width: 250px;
+  min-width: 250px;
   background: #fff;
   box-shadow: -1px 0 0 var(--line);
 }
@@ -1789,6 +1789,225 @@ textarea:focus {
 .sub-account-row-actions button.danger:hover {
   border-color: #ff7875;
   color: #ff4d4f;
+}
+
+.sub-account-usage-dialog {
+  width: min(900px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 22px 60px rgba(15, 23, 42, 0.24);
+}
+
+.sub-account-usage-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  border-bottom: 1px solid var(--line);
+  padding: 20px 24px 16px;
+}
+
+.sub-account-usage-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: #172033;
+  font-size: 19px;
+}
+
+.sub-account-usage-header h2 svg {
+  color: var(--blue);
+}
+
+.sub-account-usage-header p {
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.sub-account-usage-tools {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.sub-account-usage-tools button {
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #fff;
+  color: #667085;
+}
+
+.sub-account-usage-tools button:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.sub-account-usage-tools button:disabled {
+  cursor: wait;
+  opacity: 0.45;
+}
+
+.sub-account-usage-body {
+  min-height: 280px;
+  overflow: auto;
+  padding: 20px 24px;
+}
+
+.sub-account-usage-query {
+  width: fit-content;
+  margin: 0 0 16px;
+  border-radius: 5px;
+  background: #f0f7ff;
+  padding: 6px 10px;
+  color: #1677ff;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 13px;
+}
+
+.sub-account-usage-totals {
+  display: grid;
+  grid-template-columns: 1.45fr repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0 0 20px;
+}
+
+.sub-account-usage-totals > div {
+  min-width: 0;
+  border: 1px solid #eaecf0;
+  border-radius: 8px;
+  background: #fafafa;
+  padding: 13px 14px;
+}
+
+.sub-account-usage-totals dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sub-account-usage-totals dd {
+  margin: 6px 0 0;
+  color: #172033;
+  font-size: 21px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-account-usage-totals > div:first-child dd {
+  color: var(--blue);
+}
+
+.sub-account-usage-table {
+  min-width: 720px;
+}
+
+.sub-account-usage-table th:nth-child(n + 3),
+.sub-account-usage-table td:nth-child(n + 3) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.sub-account-usage-table td:nth-child(2) {
+  max-width: 280px;
+  overflow-wrap: anywhere;
+}
+
+.sub-account-usage-amount {
+  color: var(--blue);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-account-usage-share {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-account-usage-share > i {
+  width: 58px;
+  height: 6px;
+  display: block;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf0f4;
+}
+
+.sub-account-usage-share b {
+  height: 100%;
+  display: block;
+  border-radius: inherit;
+  background: var(--blue);
+}
+
+.sub-account-usage-state {
+  min-height: 230px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.sub-account-usage-state > p {
+  margin: 0;
+}
+
+.sub-account-usage-state > svg {
+  color: var(--blue);
+}
+
+.sub-account-usage-state.error > svg {
+  color: var(--orange);
+}
+
+.sub-account-usage-source {
+  margin: 16px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sub-account-usage-footer {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  border-top: 1px solid var(--line);
+  padding: 12px 24px;
+}
+
+@media (max-width: 720px) {
+  .sub-account-usage-header,
+  .sub-account-usage-body {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
+
+  .sub-account-usage-totals {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .sub-account-usage-totals > div:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .sub-account-usage-footer {
+    padding-right: 16px;
+    padding-left: 16px;
+  }
 }
 
 table {

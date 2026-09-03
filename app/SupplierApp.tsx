@@ -213,6 +213,25 @@ type SubAccount = {
   status?: number;
 };
 
+type SubAccountUsageSummary = {
+  totalAmount: string;
+  listedAmount: string | null;
+  amountsDiffer: boolean;
+  channelCount: number;
+  tagCount: number;
+  platformCount: number;
+  modelCount: number;
+  queryPrefix: string;
+  rows: Array<{
+    category: string;
+    model: string;
+    channelCount: number;
+    tagCount: number;
+    amount: string;
+    sharePercent: string;
+  }>;
+};
+
 type Notice = {
   type: 'ok' | 'warn' | 'error';
   text: string;
@@ -246,6 +265,22 @@ const englishTranslations: Record<string, string> = {
   '刷新': 'Refresh',
   '提交': 'Submit',
   '操作': 'Actions',
+  '查看消耗': 'View Usage',
+  '查看 {{name}} 的消耗': 'View usage for {{name}}',
+  '平台模型消耗': 'Platform & Model Usage',
+  '消耗总量': 'Total Usage',
+  '涉及平台': 'Platforms',
+  '模型统计': 'Model Groups',
+  '匹配标签': 'Matching Tags',
+  '渠道记录': 'Channel Records',
+  '查询标签前缀：{{prefix}}*': 'Tag prefix: {{prefix}}*',
+  '平台': 'Platform',
+  '全部模型': 'All Models',
+  '加载子账号消耗失败': 'Failed to load sub-account usage',
+  '正在按标签汇总消耗': 'Summarizing usage by tag',
+  '该用户暂无匹配标签的渠道消耗': 'No channel usage matches this user’s tags',
+  '子账号列表额度为 {{amount}}，与标签查询合计不同。': 'The sub-account list shows {{amount}}, which differs from the tag-based total.',
+  '统计口径：按标签前缀 {{prefix}}* 查询渠道，并按平台和模型汇总累计消耗。': 'Source: channels matching {{prefix}}*, grouped by platform and model.',
   '状态': 'Status',
   '分类': 'Category',
   '备注': 'Note',
@@ -474,6 +509,7 @@ const englishTranslations: Record<string, string> = {
   '目前没有模型缺口提醒。': 'There are currently no model gap alerts.',
   '当前账号无权限管理子账号': 'This account cannot manage sub-accounts',
   '管理子账号。': 'Manage sub-accounts.',
+  '管理子账号及其平台模型消耗。': 'Manage sub-accounts and their platform/model usage.',
   '正在检查权限': 'Checking permissions',
   '新增子账号': 'Add Sub-account',
   '创建子账号': 'Create Sub-account',
@@ -3981,6 +4017,153 @@ function ModelGapsView() {
   );
 }
 
+function SubAccountUsageDialog({
+  account,
+  onClose,
+}: {
+  account: SubAccount;
+  onClose: () => void;
+}) {
+  const { language, t } = useLanguage();
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [summary, setSummary] = useState<SubAccountUsageSummary | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setSummary(null);
+    setError('');
+    api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage`, {
+      fresh: true,
+      signal: controller.signal,
+    })
+      .then((value) => {
+        if (!controller.signal.aborted) setSummary(value);
+      })
+      .catch((failure) => {
+        if (!controller.signal.aborted) {
+          setError(failure instanceof Error ? failure.message : t('加载子账号消耗失败'));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [account.id, attempt, t]);
+
+  return (
+    <div
+      className="dialog-backdrop sub-account-usage-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+      role="presentation"
+    >
+      <section
+        aria-labelledby="sub-account-usage-title"
+        aria-modal="true"
+        className="sub-account-usage-dialog"
+        role="dialog"
+      >
+        <header className="sub-account-usage-header">
+          <div>
+            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('平台模型消耗')}</h2>
+            <p>{account.display_name || account.username} · {t('本站用户名')} {account.username} · ID {account.id}</p>
+          </div>
+          <div className="sub-account-usage-tools">
+            <button
+              aria-label={t('刷新')}
+              disabled={loading}
+              onClick={() => setAttempt((value) => value + 1)}
+              title={t('刷新')}
+              type="button"
+            >
+              <RefreshCcw className={loading ? 'spin' : ''} size={17} />
+            </button>
+            <button aria-label={t('关闭')} onClick={onClose} title={t('关闭')} type="button"><X size={19} /></button>
+          </div>
+        </header>
+        <div aria-busy={loading} className="sub-account-usage-body">
+          {loading ? (
+            <div className="sub-account-usage-state" role="status">
+              <Loader2 className="spin" size={25} />
+              <span>{t('正在按标签汇总消耗')}</span>
+            </div>
+          ) : error ? (
+            <div className="sub-account-usage-state error" role="alert">
+              <AlertTriangle size={25} />
+              <p>{error}</p>
+              <button className="ghost-button compact" onClick={() => setAttempt((value) => value + 1)} type="button">
+                <RefreshCcw size={15} />{t('重试')}
+              </button>
+            </div>
+          ) : summary && (
+            <>
+              <p className="sub-account-usage-query">{t('查询标签前缀：{{prefix}}*', { prefix: summary.queryPrefix })}</p>
+              <dl className="sub-account-usage-totals">
+                <div><dt>{t('消耗总量')}</dt><dd>${summary.totalAmount}</dd></div>
+                <div><dt>{t('涉及平台')}</dt><dd>{formatInteger(summary.platformCount)}</dd></div>
+                <div><dt>{t('模型统计')}</dt><dd>{formatInteger(summary.modelCount)}</dd></div>
+                <div><dt>{t('匹配标签')}</dt><dd>{formatInteger(summary.tagCount)}</dd></div>
+                <div><dt>{t('渠道记录')}</dt><dd>{formatInteger(summary.channelCount)}</dd></div>
+              </dl>
+              {summary.amountsDiffer && summary.listedAmount && (
+                <NoticeBanner notice={{
+                  type: 'warn',
+                  text: t('子账号列表额度为 {{amount}}，与标签查询合计不同。', { amount: `$${summary.listedAmount}` }),
+                }} />
+              )}
+              {summary.rows.length ? (
+                <div className="table-wrap">
+                  <table className="sub-account-usage-table">
+                    <thead>
+                      <tr>
+                        <th>{t('平台')}</th>
+                        <th>{t('模型')}</th>
+                        <th>{t('匹配标签')}</th>
+                        <th>{t('渠道记录')}</th>
+                        <th>{t('消耗总量')}</th>
+                        <th>{t('占比')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summary.rows.map((row) => (
+                        <tr key={`${row.category}-${row.model}`}>
+                          <td>{row.category ? categoryLabel(row.category, language) : '-'}</td>
+                          <td><code>{row.model || t('全部模型')}</code></td>
+                          <td>{formatInteger(row.tagCount)}</td>
+                          <td>{formatInteger(row.channelCount)}</td>
+                          <td className="sub-account-usage-amount">${row.amount}</td>
+                          <td>
+                            <span className="sub-account-usage-share">
+                              <i aria-hidden="true"><b style={{ width: `${row.sharePercent}%` }} /></i>
+                              {row.sharePercent}%
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="sub-account-usage-state empty"><Inbox size={30} /><p>{t('该用户暂无匹配标签的渠道消耗')}</p></div>
+              )}
+              <p className="sub-account-usage-source">
+                {t('统计口径：按标签前缀 {{prefix}}* 查询渠道，并按平台和模型汇总累计消耗。', { prefix: summary.queryPrefix })}
+              </p>
+            </>
+          )}
+        </div>
+        <footer className="sub-account-usage-footer">
+          <button className="ghost-button compact" onClick={onClose} type="button">{t('关闭')}</button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function isStrongSubAccountPassword(password: string) {
   return password.length >= 8
     && /[A-Za-z]/.test(password)
@@ -4324,6 +4507,7 @@ function SubAccountsView() {
   const [items, setItems] = useState<SubAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [usageAccount, setUsageAccount] = useState<SubAccount | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<SubAccount | null>(null);
   const [deletingAccount, setDeletingAccount] = useState<SubAccount | null>(null);
@@ -4371,7 +4555,7 @@ function SubAccountsView() {
       <PageHeading
         icon={Users}
         title={t('子账号管理')}
-        subtitle={t('管理子账号。')}
+        subtitle={t('管理子账号及其平台模型消耗。')}
         action={
           <div className="action-row">
             <button className="ghost-button compact" onClick={() => load(true)} type="button">
@@ -4421,6 +4605,9 @@ function SubAccountsView() {
                     </td>
                     <td>
                       <div className="sub-account-row-actions">
+                        <button aria-label={t('查看 {{name}} 的消耗', { name: item.username })} onClick={() => setUsageAccount(item)} type="button">
+                          <BarChart3 size={14} />{t('查看消耗')}
+                        </button>
                         <button aria-label={t('编辑 {{name}}', { name: item.username })} onClick={() => setEditingAccount(item)} type="button">
                           <Pencil size={14} />{t('编辑')}
                         </button>
@@ -4438,6 +4625,7 @@ function SubAccountsView() {
           <EmptyState title={t('暂无子账号')} description={t('点击“新增子账号”创建第一个子账号。')} />
         )}
       </div>
+      {usageAccount && <SubAccountUsageDialog key={usageAccount.id} account={usageAccount} onClose={() => setUsageAccount(null)} />}
       {createOpen && <CreateSubAccountDialog onClose={() => setCreateOpen(false)} onCreated={handleCreated} />}
       {editingAccount && <EditSubAccountDialog key={editingAccount.id} account={editingAccount} onClose={() => setEditingAccount(null)} onUpdated={handleUpdated} />}
       {deletingAccount && <DeleteSubAccountDialog key={deletingAccount.id} account={deletingAccount} onClose={() => setDeletingAccount(null)} onDeleted={handleDeleted} />}

@@ -10,8 +10,10 @@ import threading
 import time
 import uuid
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -640,6 +642,154 @@ def build_upload_tag(user_id: int, category: str, now: datetime | None = None) -
     return f"{user_id}-{clean_category}-{current.strftime('%H%M%S')}"
 
 
+def quota_decimal(value: Any) -> Decimal:
+    try:
+        quota = Decimal(str(value or 0))
+    except (InvalidOperation, TypeError, ValueError) as error:
+        raise BackendError(502, "渠道消耗数据格式不正确") from error
+    if not quota.is_finite():
+        raise BackendError(502, "渠道消耗数据格式不正确")
+    return quota
+
+
+def quota_dollars(value: Decimal) -> str:
+    return f"{value / Decimal(500_000):.4f}"
+
+
+def channel_model_label(channel: dict[str, Any]) -> str:
+    for field in ("model_name", "model", "models"):
+        value = channel.get(field)
+        if isinstance(value, list):
+            models = [str(item).strip() for item in value if str(item).strip()]
+            if models:
+                return ", ".join(models)
+        if isinstance(value, str) and value.strip():
+            text = value.strip()
+            if text.startswith("["):
+                try:
+                    parsed = json.loads(text)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, list):
+                    models = [str(item).strip() for item in parsed if str(item).strip()]
+                    if models:
+                        return ", ".join(models)
+            return ", ".join(part.strip() for part in text.split(",") if part.strip())
+    return ""
+
+
+def extract_tags(data: Any) -> list[str]:
+    values = data if isinstance(data, list) else data.get("items", data.get("tags", [])) if isinstance(data, dict) else []
+    tags: set[str] = set()
+    for value in values if isinstance(values, list) else []:
+        candidate = value.get("tag", value.get("name")) if isinstance(value, dict) else value
+        if isinstance(candidate, str) and candidate.strip():
+            tags.add(candidate.strip())
+    return sorted(tags)
+
+
+async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[str, Any]:
+    children = await authorized_json(session, "/api/sub-accounts")
+    child_items = children if isinstance(children, list) else children.get("items", []) if isinstance(children, dict) else []
+    source: dict[str, Any] | None = None
+    for item in child_items if isinstance(child_items, list) else []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            item_id = int(item.get("id", 0))
+        except (TypeError, ValueError):
+            continue
+        if item_id == target_id:
+            source = item
+            break
+    if source is None:
+        raise BackendError(404, "子账号不存在")
+
+    tag_pattern = re.compile(rf"^{target_id}-(?P<category>[a-z0-9_]+)-\d{{6}}$", re.IGNORECASE)
+    matching_tags = [tag for tag in extract_tags(await authorized_json(session, "/api/channels/tags")) if tag_pattern.fullmatch(tag)]
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    seen_channel_ids: set[int] = set()
+    total_quota = Decimal(0)
+
+    for tag in matching_tags:
+        match = tag_pattern.fullmatch(tag)
+        tag_category = match.group("category").lower() if match else ""
+        page = 1
+        loaded = 0
+        while True:
+            query = urlencode({"page": page, "page_size": 500, "tag": tag})
+            data = await authorized_json(session, f"/api/channels?{query}")
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+                raise BackendError(502, "渠道数据格式不正确，无法准确统计")
+            try:
+                total = int(data.get("total", 0))
+                current_page = int(data.get("page", page))
+                page_size = int(data.get("page_size", 500))
+            except (TypeError, ValueError) as error:
+                raise BackendError(502, "渠道分页数据不完整，请刷新重试") from error
+            if total < 0 or current_page != page or page_size <= 0:
+                raise BackendError(502, "渠道分页数据不完整，请刷新重试")
+            page_items = data["items"]
+            for channel in page_items:
+                if not isinstance(channel, dict):
+                    raise BackendError(502, "渠道数据格式不正确，无法准确统计")
+                try:
+                    channel_id = int(channel.get("id"))
+                except (TypeError, ValueError) as error:
+                    raise BackendError(502, "渠道数据格式不正确，无法准确统计") from error
+                if channel_id in seen_channel_ids:
+                    continue
+                seen_channel_ids.add(channel_id)
+                category = str(channel.get("category") or tag_category).strip().lower()
+                model = channel_model_label(channel)
+                quota = quota_decimal(channel.get("used_quota", channel.get("quota", 0)))
+                key = (category, model)
+                group = grouped.setdefault(
+                    key,
+                    {
+                        "category": category,
+                        "model": model,
+                        "quota": Decimal(0),
+                        "channelCount": 0,
+                        "tags": set(),
+                    },
+                )
+                group["quota"] += quota
+                group["channelCount"] += 1
+                group["tags"].add(tag)
+                total_quota += quota
+            loaded += len(page_items)
+            if loaded >= total:
+                break
+            if not page_items:
+                raise BackendError(502, "渠道分页数据不完整，请刷新重试")
+            page += 1
+
+    rows = sorted(grouped.values(), key=lambda item: (-item["quota"], item["category"], item["model"]))
+    listed_quota = quota_decimal(source.get("used_quota")) if "used_quota" in source else None
+    return {
+        "totalAmount": quota_dollars(total_quota),
+        "listedAmount": quota_dollars(listed_quota) if listed_quota is not None else None,
+        "amountsDiffer": listed_quota is not None and listed_quota != total_quota,
+        "channelCount": len(seen_channel_ids),
+        "tagCount": len(matching_tags),
+        "platformCount": len({row["category"] for row in rows}),
+        "modelCount": len(rows),
+        "queryPrefix": f"{target_id}-",
+        "rows": [
+            {
+                "category": row["category"],
+                "model": row["model"],
+                "channelCount": row["channelCount"],
+                "tagCount": len(row["tags"]),
+                "amount": quota_dollars(row["quota"]),
+                "sharePercent": f"{(row['quota'] / total_quota * 100) if total_quota else 0:.2f}",
+            }
+            for row in rows
+        ],
+    }
+
+
 def unwrap(response: httpx.Response, payload: Any) -> Any:
     if not isinstance(payload, dict):
         if response.is_success:
@@ -1074,6 +1224,16 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             data = await authorized_json(session, path, method="PUT", body=update_body)
             store.rename_sub_account_alias(target_id, username, display_name)
             return success_response(request, request_id, sanitize_data(data), cookie)
+
+        usage_match = re.fullmatch(r"/api/sub-accounts/(\d+)/tag-usage", path)
+        if usage_match and request.method == "GET":
+            if session["role"] not in {"supplier", "admin"}:
+                raise BackendError(403, "当前账号无权查看子账号消耗")
+            target_id = int(usage_match.group(1))
+            if target_id <= 0:
+                raise BackendError(400, "子账号 ID 无效")
+            data = await sub_account_tag_usage(session, target_id)
+            return success_response(request, request_id, data, cookie)
 
         allowed_patterns = READ_PATHS if request.method == "GET" else WRITE_PATHS.get(request.method, ())
         if not any(pattern.fullmatch(path) for pattern in allowed_patterns):
