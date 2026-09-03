@@ -9,8 +9,10 @@ import sqlite3
 import threading
 import time
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastapi import FastAPI, Request
@@ -24,6 +26,7 @@ DEFAULT_ACCOUNT_ALIASES = (
     ("sanyeyuanqi", "hhxxzz4", "sanyeyuanqi"),
     ("okoko", "okoko", "okoko"),
 )
+GYS_TIMEZONE = ZoneInfo("Asia/Shanghai")
 PUBLIC_AUTH = {
     "/api/auth/login-captcha",
     "/api/auth/captcha/slide",
@@ -629,6 +632,14 @@ def public_profile(session: sqlite3.Row) -> dict[str, Any]:
     }
 
 
+def build_upload_tag(user_id: int, category: str, now: datetime | None = None) -> str:
+    clean_category = category.strip().lower()
+    if user_id <= 0 or not re.fullmatch(r"[a-z0-9_]{1,64}", clean_category):
+        raise BackendError(400, "上传分类无效")
+    current = now.astimezone(GYS_TIMEZONE) if now else datetime.now(GYS_TIMEZONE)
+    return f"{user_id}-{clean_category}-{current.strftime('%H%M%S')}"
+
+
 def unwrap(response: httpx.Response, payload: Any) -> Any:
     if not isinstance(payload, dict):
         if response.is_success:
@@ -1075,8 +1086,22 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             field in body for field in ("user_id", "supplier_id", "uploader_id", "role", "username", "password")
         ):
             raise BackendError(400, "不允许修改账号归属")
+        assigned_tag: str | None = None
+        if request.method == "POST" and path in {"/api/channels", "/api/channels/batch"}:
+            category = body.get("category") if body is not None else None
+            if not isinstance(category, str):
+                raise BackendError(400, "上传分类无效")
+            try:
+                user_id = int(session["upstream_user_id"])
+            except (TypeError, ValueError) as error:
+                raise BackendError(401, "用户身份无效，请重新登录") from error
+            assigned_tag = build_upload_tag(user_id, category)
+            body = {**body, "tag": assigned_tag}
         full_path = path + (f"?{request.url.query}" if request.url.query else "")
         data = await authorized_json(session, full_path, method=request.method, body=body)
+
+        if assigned_tag and isinstance(data, dict):
+            data = {**data, "tag": assigned_tag}
 
         if path == "/api/dashboard" and isinstance(data, dict):
             current_profile = public_profile(store.current(session))

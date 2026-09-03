@@ -3553,6 +3553,16 @@ tr:last-child td {
   font-weight: 400;
 }
 
+.tag-input-wrap input:disabled {
+  background: #f5f7fa;
+  color: #667085;
+  cursor: not-allowed;
+  opacity: 1;
+  pointer-events: none;
+  user-select: none;
+  -webkit-text-fill-color: #667085;
+}
+
 .tag-input-wrap input::placeholder,
 .upload-key-list-field textarea::placeholder,
 .upload-single-key-field textarea::placeholder,

@@ -298,16 +298,15 @@ const englishTranslations: Record<string, string> = {
   '快捷入口': 'Quick Access',
   '上传 API 密钥': 'Upload API Keys',
   '系统维护中，暂停上传。已上传渠道的查询、消费统计不受影响。': 'Uploads are temporarily paused for maintenance. Existing channel queries and usage statistics are unaffected.',
-  '选择分类、粘贴密钥、填写标签即可提交。系统自动创建渠道、归入分组并完成上线。各上游实例可单独限制接收的分类；上传页仅隐藏当前无人接收的分类。': 'Choose a category, paste a key, and enter a tag. The system will create the channel, assign it to the group, and bring it online automatically. Categories with no available upstream receiver are hidden.',
-  '每次上传请使用全新的标签 / 分组': 'Use a new tag / group for every upload',
-  '同一标签只能用于一次上传：若标签已存在，系统会拒绝，避免 key 一直往老批次累加、消费与统计混乱。需要再传一批请换一个新标签名。（同一次批量上传里的多个 key 仍会正常归到该新标签下。）': 'A tag can only be used for one upload. Existing tags are rejected to prevent keys and usage from accumulating in an old batch. Use a new tag for each new batch. Multiple keys in the same upload will still be grouped under that new tag.',
+  '选择分类并粘贴密钥即可提交。标签 / 分组由系统自动生成，系统随后创建渠道、归入分组并完成上线。各上游实例可单独限制接收的分类；上传页仅隐藏当前无人接收的分类。': 'Choose a category and paste a key to submit. The tag / group is generated automatically, then the channel is created, grouped, and brought online. Categories with no available upstream receiver are hidden.',
+  '标签 / 分组由系统自动生成': 'The tag / group is generated automatically',
+  '标签格式为“用户ID-category-HHmmss”，不可选择、删除或修改；每次提交都会生成当前时刻的新标签。': 'The format is “userID-category-HHmmss”. It cannot be selected, deleted, or edited, and each submission receives a tag for the current time.',
   '批量上传': 'Batch Upload',
   '单个上传': 'Single Upload',
   '渠道分类': 'Channel Category',
   '（可选）': '(optional)',
   '每行一个密钥': 'One key per line',
-  '标签 / 分组': 'Tag / Group',
-  '输入一个全新的标签名（不可与已有重复），例如：客户A-20260701': 'Enter a new unique tag, for example: client-A-20260701',
+  '标签 / 分组（系统生成）': 'Tag / Group (system generated)',
   '高级选项（模型范围 · RPM · 号况 · 备注 · 代理，默认全部模型）': 'Advanced options (models, RPM, account status, note, proxy; all models by default)',
   '可用模型范围': 'Available Models',
   '已选 {{selected}}/{{total}}': '{{selected}}/{{total}} selected',
@@ -323,7 +322,6 @@ const englishTranslations: Record<string, string> = {
   '可上传 {{count}} 条': '{{count}} keys ready',
   '请填写该渠道的 API Key。': 'Enter the API key for this channel.',
   '密钥': 'Key',
-  '请填写全新的标签 / 分组。': 'Enter a new tag / group.',
   '请输入至少一条密钥。': 'Enter at least one key.',
   '请输入 Base URL。': 'Enter the Base URL.',
   '提交完成：{{success}}/{{total}} 成功。': 'Submitted: {{success}}/{{total}} succeeded.',
@@ -955,6 +953,14 @@ function formatDate(value?: string | null, language: Language = 'zh') {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function buildUploadTag(userId: number, category: string, timestamp: number) {
+  const date = new Date(timestamp);
+  const time = [date.getHours(), date.getMinutes(), date.getSeconds()]
+    .map((value) => String(value).padStart(2, '0'))
+    .join('');
+  return `${userId}-${category}-${time}`;
 }
 
 function viewFromPath(pathname: string): ViewKey {
@@ -1929,14 +1935,14 @@ function PageHeading({
   );
 }
 
-function UploadView() {
+function UploadView({ user }: { user: UserProfile }) {
   const { language, t } = useLanguage();
   const [mode, setMode] = useState<'batch' | 'single'>('batch');
   const [switchData, setSwitchData] = useState<UploadSwitch | null>(null);
   const [category, setCategory] = useState('aws');
   const [models, setModels] = useState<string[]>([]);
   const [selectedModels, setSelectedModels] = useState<string[]>([]);
-  const [tag, setTag] = useState('');
+  const [tagTimestamp, setTagTimestamp] = useState(() => Date.now());
   const [keys, setKeys] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [remark, setRemark] = useState('');
@@ -1961,6 +1967,11 @@ function UploadView() {
   }, [categories]);
   const activeCategoryCard =
     visibleCategoryCards.find((card) => card.categories.includes(category)) || visibleCategoryCards[0];
+  const userId = Number(user.id ?? user.user_id);
+  const tag = useMemo(
+    () => buildUploadTag(userId, category, tagTimestamp),
+    [category, tagTimestamp, userId],
+  );
   const parsedKeys = useMemo(
     () =>
       keys
@@ -1981,6 +1992,12 @@ function UploadView() {
       }),
     [category, parsedKeys],
   );
+
+  useEffect(() => {
+    setTagTimestamp(Date.now());
+    const timer = window.setInterval(() => setTagTimestamp(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [category]);
 
   useEffect(() => {
     api<UploadSwitch>('/api/settings/upload-switch')
@@ -2077,11 +2094,6 @@ function UploadView() {
     setNotice(null);
     setResults([]);
 
-    if (!tag.trim()) {
-      setNotice({ type: 'warn', text: t('请填写全新的标签 / 分组。') });
-      return;
-    }
-
     if (!parsedKeys.length) {
       setNotice({ type: 'warn', text: t('请输入至少一条密钥。') });
       return;
@@ -2166,16 +2178,16 @@ function UploadView() {
       )}
       <h2>{t('上传 API 密钥')}</h2>
       <p className="upload-intro">
-        {t('选择分类、粘贴密钥、填写标签即可提交。系统自动创建渠道、归入分组并完成上线。各上游实例可单独限制接收的分类；上传页仅隐藏当前无人接收的分类。')}
+        {t('选择分类并粘贴密钥即可提交。标签 / 分组由系统自动生成，系统随后创建渠道、归入分组并完成上线。各上游实例可单独限制接收的分类；上传页仅隐藏当前无人接收的分类。')}
       </p>
       <div className="warning-card">
         <span className="warning-icon">
           !
         </span>
         <div>
-          <strong>{t('每次上传请使用全新的标签 / 分组')}</strong>
+          <strong>{t('标签 / 分组由系统自动生成')}</strong>
           <p>
-            {t('同一标签只能用于一次上传：若标签已存在，系统会拒绝，避免 key 一直往老批次累加、消费与统计混乱。需要再传一批请换一个新标签名。（同一次批量上传里的多个 key 仍会正常归到该新标签下。）')}
+            {t('标签格式为“用户ID-category-HHmmss”，不可选择、删除或修改；每次提交都会生成当前时刻的新标签。')}
           </p>
         </div>
       </div>
@@ -2256,14 +2268,14 @@ function UploadView() {
 
             <label className="upload-tag-field">
               <span>
-                {t('标签 / 分组')} <span className="field-help">?</span>
+                {t('标签 / 分组（系统生成）')} <span className="field-help">?</span>
               </span>
               <span className="tag-input-wrap">
                 <Tag aria-hidden="true" size={15} />
                 <input
+                  aria-label={t('标签 / 分组（系统生成）')}
+                  disabled
                   value={tag}
-                  onChange={(event) => setTag(event.target.value)}
-                  placeholder={t('输入一个全新的标签名（不可与已有重复），例如：客户A-20260701')}
                 />
               </span>
             </label>
@@ -2331,7 +2343,7 @@ function UploadView() {
 
             <button
               className="upload-submit-button"
-              disabled={submitting || !tag.trim() || !parsedKeys.length || (mode === 'single' && category === 'aws_a' && !baseUrl.trim())}
+              disabled={submitting || !parsedKeys.length || (mode === 'single' && category === 'aws_a' && !baseUrl.trim())}
               type="submit"
             >
               {submitting ? <Loader2 className="spin" size={17} /> : <UploadCloud size={17} />}
@@ -4437,13 +4449,15 @@ function SubAccountsView() {
 }
 
 function ViewRenderer({
+  user,
   view,
   setView,
 }: {
+  user: UserProfile;
   view: ViewKey;
   setView: (view: ViewKey) => void;
 }) {
-  if (view === 'upload') return <UploadView />;
+  if (view === 'upload') return <UploadView user={user} />;
   if (view === 'my-channels') return <MyChannelsView />;
   if (view === 'api-access') return <ApiAccessView />;
   if (view === 'sub-accounts') return <SubAccountsView />;
@@ -4584,6 +4598,7 @@ function SupplierApplication() {
         </div>
       )}
       <ViewRenderer
+        user={user}
         view={activeView}
         setView={(view) => {
           setActiveView(view);
