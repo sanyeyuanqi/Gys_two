@@ -4013,7 +4013,7 @@ function SubAccountUsageDialog({
     setLoading(true);
     setSummary(null);
     setError('');
-    api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage?category=${encodeURIComponent(categoryFilter)}`, {
+    api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage`, {
       fresh: true,
       signal: controller.signal,
     })
@@ -4031,7 +4031,7 @@ function SubAccountUsageDialog({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [account.id, attempt, categoryFilter, t]);
+  }, [account.id, attempt, t]);
 
   return (
     <div
@@ -4093,7 +4093,7 @@ function SubAccountUsageDialog({
                   >
                     <span className="sub-account-usage-category-letter">{category.name[0]}</span>
                     <strong>{category.name}</strong>
-                    <small>{account.id}-{category.key}</small>
+                    <small>${category.stats?.amount || '0.0000'}</small>
                   </button>
                 ))}
               </div>

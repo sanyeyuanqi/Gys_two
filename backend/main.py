@@ -728,11 +728,12 @@ async def channel_model_usage(session: sqlite3.Row, channel_id: int) -> dict[str
 async def sub_account_tag_usage(
     session: sqlite3.Row,
     target_id: int,
-    requested_category: str,
+    requested_category: str | None,
 ) -> dict[str, Any]:
-    category_filter = requested_category.strip().lower()
-    if category_filter not in CHANNEL_USAGE_CATEGORIES:
+    category_filter = requested_category.strip().lower() if requested_category else ""
+    if category_filter and category_filter not in CHANNEL_USAGE_CATEGORIES:
         raise BackendError(400, "渠道分类无效")
+    category_filters = (category_filter,) if category_filter else CHANNEL_USAGE_CATEGORIES
 
     children = await authorized_json(session, "/api/sub-accounts")
     child_items = children if isinstance(children, list) else children.get("items", []) if isinstance(children, dict) else []
@@ -750,58 +751,71 @@ async def sub_account_tag_usage(
     if source is None:
         raise BackendError(404, "子账号不存在")
 
-    query_tag = f"{target_id}-{category_filter}"
     matching_tags: set[str] = set()
     seen_channel_ids: set[int] = set()
     channels: list[dict[str, Any]] = []
 
-    page = 1
-    loaded = 0
-    while True:
-        query = urlencode({"page": page, "page_size": 500, "tag": query_tag})
-        data = await authorized_json(session, f"/api/channels?{query}")
-        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
-            raise BackendError(502, "渠道数据格式不正确，无法准确统计")
-        try:
-            total = int(data.get("total", 0))
-            current_page = int(data.get("page", page))
-            page_size = int(data.get("page_size", 500))
-        except (TypeError, ValueError) as error:
-            raise BackendError(502, "渠道分页数据不完整，请刷新重试") from error
-        if total < 0 or current_page != page or page_size <= 0:
-            raise BackendError(502, "渠道分页数据不完整，请刷新重试")
-        page_items = data["items"]
-        for channel in page_items:
-            if not isinstance(channel, dict):
+    channel_query_semaphore = asyncio.Semaphore(4)
+
+    async def load_category_channels(category: str) -> list[dict[str, Any]]:
+        query_tag = f"{target_id}-{category}"
+        category_channels: list[dict[str, Any]] = []
+        page = 1
+        loaded = 0
+        while True:
+            query = urlencode({"page": page, "page_size": 500, "tag": query_tag})
+            async with channel_query_semaphore:
+                data = await authorized_json(session, f"/api/channels?{query}")
+            if not isinstance(data, dict) or not isinstance(data.get("items"), list):
                 raise BackendError(502, "渠道数据格式不正确，无法准确统计")
-            tag = str(channel.get("tag") or "").strip()
-            if tag != query_tag and not tag.startswith(f"{query_tag}-"):
-                continue
-            category = str(channel.get("category") or "").strip().lower()
-            if category != category_filter:
-                continue
             try:
-                channel_id = int(channel.get("id"))
+                total = int(data.get("total", 0))
+                current_page = int(data.get("page", page))
+                page_size = int(data.get("page_size", 500))
             except (TypeError, ValueError) as error:
-                raise BackendError(502, "渠道数据格式不正确，无法准确统计") from error
-            if channel_id in seen_channel_ids:
+                raise BackendError(502, "渠道分页数据不完整，请刷新重试") from error
+            if total < 0 or current_page != page or page_size <= 0:
+                raise BackendError(502, "渠道分页数据不完整，请刷新重试")
+            page_items = data["items"]
+            for channel in page_items:
+                if not isinstance(channel, dict):
+                    raise BackendError(502, "渠道数据格式不正确，无法准确统计")
+                tag = str(channel.get("tag") or "").strip()
+                if tag != query_tag and not tag.startswith(f"{query_tag}-"):
+                    continue
+                channel_category = str(channel.get("category") or "").strip().lower()
+                if channel_category != category:
+                    continue
+                try:
+                    channel_id = int(channel.get("id"))
+                except (TypeError, ValueError) as error:
+                    raise BackendError(502, "渠道数据格式不正确，无法准确统计") from error
+                category_channels.append(
+                    {
+                        "id": channel_id,
+                        "category": channel_category,
+                        "tag": tag,
+                        "quota": quota_decimal(channel.get("used_quota", channel.get("quota", 0))),
+                    }
+                )
+            loaded += len(page_items)
+            if loaded >= total:
+                break
+            if not page_items:
+                raise BackendError(502, "渠道分页数据不完整，请刷新重试")
+            page += 1
+        return category_channels
+
+    category_channel_results = await asyncio.gather(
+        *(load_category_channels(category) for category in category_filters)
+    )
+    for category_channels in category_channel_results:
+        for channel in category_channels:
+            if channel["id"] in seen_channel_ids:
                 continue
-            seen_channel_ids.add(channel_id)
-            matching_tags.add(tag)
-            channels.append(
-                {
-                    "id": channel_id,
-                    "category": category,
-                    "tag": tag,
-                    "quota": quota_decimal(channel.get("used_quota", channel.get("quota", 0))),
-                }
-            )
-        loaded += len(page_items)
-        if loaded >= total:
-            break
-        if not page_items:
-            raise BackendError(502, "渠道分页数据不完整，请刷新重试")
-        page += 1
+            seen_channel_ids.add(channel["id"])
+            matching_tags.add(channel["tag"])
+            channels.append(channel)
 
     semaphore = asyncio.Semaphore(4)
 
@@ -880,7 +894,11 @@ async def sub_account_tag_usage(
         "platformCount": len(categories),
         "modelCount": len(rows),
         "requestCount": total_requests,
-        "queryPrefix": query_tag,
+        "queryPrefix": (
+            f"{target_id}-{category_filters[0]}"
+            if len(category_filters) == 1
+            else f"{target_id}-{{category}}"
+        ),
         "categories": [
             {
                 "category": category["category"],
@@ -1349,7 +1367,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             target_id = int(usage_match.group(1))
             if target_id <= 0:
                 raise BackendError(400, "子账号 ID 无效")
-            category = request.query_params.get("category", "")
+            category = request.query_params.get("category")
             data = await sub_account_tag_usage(session, target_id, category)
             return success_response(request, request_id, data, cookie)
 
