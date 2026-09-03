@@ -1877,7 +1877,7 @@ textarea:focus {
 
 .sub-account-usage-totals {
   display: grid;
-  grid-template-columns: 1.45fr repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
   margin: 0 0 20px;
 }
@@ -1907,8 +1907,70 @@ textarea:focus {
   color: var(--blue);
 }
 
+.sub-account-usage-categories {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  gap: 9px;
+  margin: 0 0 20px;
+}
+
+.sub-account-usage-categories button {
+  --category-color: var(--blue);
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid #e4e7ec;
+  border-radius: 9px;
+  background: #fff;
+  padding: 11px 7px 9px;
+  color: #344054;
+  font: inherit;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.sub-account-usage-categories button:hover {
+  border-color: var(--category-color);
+  transform: translateY(-1px);
+}
+
+.sub-account-usage-categories button.active {
+  border-color: var(--category-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--category-color) 14%, transparent);
+}
+
+.sub-account-usage-category-letter {
+  width: 29px;
+  height: 29px;
+  display: grid;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--category-color);
+  color: #fff;
+  font-weight: 800;
+}
+
+.sub-account-usage-categories strong,
+.sub-account-usage-categories small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sub-account-usage-categories strong {
+  font-size: 12px;
+}
+
+.sub-account-usage-categories small {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
 .sub-account-usage-table {
-  min-width: 720px;
+  min-width: 820px;
 }
 
 .sub-account-usage-table th:nth-child(n + 3),

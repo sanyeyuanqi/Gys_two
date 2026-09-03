@@ -221,12 +221,22 @@ type SubAccountUsageSummary = {
   tagCount: number;
   platformCount: number;
   modelCount: number;
+  requestCount: number;
   queryPrefix: string;
+  categories: Array<{
+    category: string;
+    channelCount: number;
+    tagCount: number;
+    modelCount: number;
+    requestCount: number;
+    amount: string;
+  }>;
   rows: Array<{
     category: string;
     model: string;
     channelCount: number;
     tagCount: number;
+    requestCount: number;
     amount: string;
     sharePercent: string;
   }>;
@@ -273,14 +283,20 @@ const englishTranslations: Record<string, string> = {
   '模型统计': 'Model Groups',
   '匹配标签': 'Matching Tags',
   '渠道记录': 'Channel Records',
+  '请求记录': 'Requests',
+  '全部分类': 'All Categories',
+  '分类模型消耗': 'Model Usage by Category',
+  '涉及分类': 'Categories',
+  '未归属模型': 'Unattributed Model',
+  '该分类暂无模型消耗': 'No model usage in this category',
   '查询标签前缀：{{prefix}}*': 'Tag prefix: {{prefix}}*',
   '平台': 'Platform',
   '全部模型': 'All Models',
   '加载子账号消耗失败': 'Failed to load sub-account usage',
-  '正在按标签汇总消耗': 'Summarizing usage by tag',
+  '正在按分类读取全部模型消耗': 'Loading model usage by category',
   '该用户暂无匹配标签的渠道消耗': 'No channel usage matches this user’s tags',
   '子账号列表额度为 {{amount}}，与标签查询合计不同。': 'The sub-account list shows {{amount}}, which differs from the tag-based total.',
-  '统计口径：按标签前缀 {{prefix}}* 查询渠道，并按平台和模型汇总累计消耗。': 'Source: channels matching {{prefix}}*, grouped by platform and model.',
+  '统计口径：按标签前缀 {{prefix}}* 查询渠道，再读取渠道消费日志，并按分类和实际模型汇总累计消耗。': 'Source: channels matching {{prefix}}*, with usage logs grouped by category and actual model.',
   '状态': 'Status',
   '分类': 'Category',
   '备注': 'Note',
@@ -4029,6 +4045,58 @@ function SubAccountUsageDialog({
   const [loading, setLoading] = useState(true);
   const [summary, setSummary] = useState<SubAccountUsageSummary | null>(null);
   const [error, setError] = useState('');
+  const [categoryFilter, setCategoryFilter] = useState('all');
+  const categoryCards = useMemo(() => uploadCategoryCards.map((card) => ({
+    ...card,
+    amount: (summary?.categories || [])
+      .filter((item) => card.categories.includes(item.category))
+      .reduce((total, item) => total + Number(item.amount || 0), 0),
+  })), [summary]);
+  const selectedCategoryCard = categoryCards.find((card) => card.key === categoryFilter);
+  const selectedCategoryStats = (summary?.categories || []).filter((item) => (
+    selectedCategoryCard?.categories.includes(item.category)
+  ));
+  const visibleRows = useMemo(() => {
+    if (!summary || !selectedCategoryCard) return summary?.rows || [];
+    const grouped = new Map<string, SubAccountUsageSummary['rows'][number]>();
+    summary.rows
+      .filter((row) => selectedCategoryCard.categories.includes(row.category))
+      .forEach((row) => {
+        const current = grouped.get(row.model);
+        if (current) {
+          current.channelCount += row.channelCount;
+          current.tagCount += row.tagCount;
+          current.requestCount += row.requestCount;
+          current.amount = (Number(current.amount) + Number(row.amount)).toFixed(4);
+        } else {
+          grouped.set(row.model, { ...row, category: selectedCategoryCard.key });
+        }
+      });
+    const categoryTotal = selectedCategoryCard.amount;
+    return Array.from(grouped.values())
+      .map((row) => ({
+        ...row,
+        sharePercent: categoryTotal > 0
+          ? (Number(row.amount) / categoryTotal * 100).toFixed(2)
+          : '0.00',
+      }))
+      .sort((left, right) => Number(right.amount) - Number(left.amount));
+  }, [selectedCategoryCard, summary]);
+  const displayedStats = selectedCategoryCard ? {
+    amount: selectedCategoryCard.amount.toFixed(4),
+    platformCount: selectedCategoryStats.length ? 1 : 0,
+    modelCount: visibleRows.length,
+    tagCount: selectedCategoryStats.reduce((total, item) => total + item.tagCount, 0),
+    channelCount: selectedCategoryStats.reduce((total, item) => total + item.channelCount, 0),
+    requestCount: selectedCategoryStats.reduce((total, item) => total + item.requestCount, 0),
+  } : {
+    amount: summary?.totalAmount || '0.0000',
+    platformCount: summary?.platformCount || 0,
+    modelCount: summary?.modelCount || 0,
+    tagCount: summary?.tagCount || 0,
+    channelCount: summary?.channelCount || 0,
+    requestCount: summary?.requestCount || 0,
+  };
 
   useEffect(() => {
     const controller = new AbortController();
@@ -4040,7 +4108,13 @@ function SubAccountUsageDialog({
       signal: controller.signal,
     })
       .then((value) => {
-        if (!controller.signal.aborted) setSummary(value);
+        if (!controller.signal.aborted) {
+          setSummary(value);
+          const firstUsedCategory = uploadCategoryCards.find((card) => (
+            value.categories.some((item) => card.categories.includes(item.category) && item.channelCount > 0)
+          ));
+          setCategoryFilter(firstUsedCategory?.key || 'all');
+        }
       })
       .catch((failure) => {
         if (!controller.signal.aborted) {
@@ -4069,7 +4143,7 @@ function SubAccountUsageDialog({
       >
         <header className="sub-account-usage-header">
           <div>
-            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('平台模型消耗')}</h2>
+            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('分类模型消耗')}</h2>
             <p>{account.display_name || account.username} · {t('本站用户名')} {account.username} · ID {account.id}</p>
           </div>
           <div className="sub-account-usage-tools">
@@ -4089,7 +4163,7 @@ function SubAccountUsageDialog({
           {loading ? (
             <div className="sub-account-usage-state" role="status">
               <Loader2 className="spin" size={25} />
-              <span>{t('正在按标签汇总消耗')}</span>
+              <span>{t('正在按分类读取全部模型消耗')}</span>
             </div>
           ) : error ? (
             <div className="sub-account-usage-state error" role="alert">
@@ -4103,11 +4177,12 @@ function SubAccountUsageDialog({
             <>
               <p className="sub-account-usage-query">{t('查询标签前缀：{{prefix}}*', { prefix: summary.queryPrefix })}</p>
               <dl className="sub-account-usage-totals">
-                <div><dt>{t('消耗总量')}</dt><dd>${summary.totalAmount}</dd></div>
-                <div><dt>{t('涉及平台')}</dt><dd>{formatInteger(summary.platformCount)}</dd></div>
-                <div><dt>{t('模型统计')}</dt><dd>{formatInteger(summary.modelCount)}</dd></div>
-                <div><dt>{t('匹配标签')}</dt><dd>{formatInteger(summary.tagCount)}</dd></div>
-                <div><dt>{t('渠道记录')}</dt><dd>{formatInteger(summary.channelCount)}</dd></div>
+                <div><dt>{t('消耗总量')}</dt><dd>${displayedStats.amount}</dd></div>
+                <div><dt>{t('涉及分类')}</dt><dd>{formatInteger(displayedStats.platformCount)}</dd></div>
+                <div><dt>{t('模型统计')}</dt><dd>{formatInteger(displayedStats.modelCount)}</dd></div>
+                <div><dt>{t('匹配标签')}</dt><dd>{formatInteger(displayedStats.tagCount)}</dd></div>
+                <div><dt>{t('渠道记录')}</dt><dd>{formatInteger(displayedStats.channelCount)}</dd></div>
+                <div><dt>{t('请求记录')}</dt><dd>{formatInteger(displayedStats.requestCount)}</dd></div>
               </dl>
               {summary.amountsDiffer && summary.listedAmount && (
                 <NoticeBanner notice={{
@@ -4115,26 +4190,52 @@ function SubAccountUsageDialog({
                   text: t('子账号列表额度为 {{amount}}，与标签查询合计不同。', { amount: `$${summary.listedAmount}` }),
                 }} />
               )}
-              {summary.rows.length ? (
+              <div className="sub-account-usage-categories" aria-label={t('分类')} role="group">
+                <button
+                  className={categoryFilter === 'all' ? 'active' : ''}
+                  onClick={() => setCategoryFilter('all')}
+                  type="button"
+                >
+                  <span className="sub-account-usage-category-letter">Σ</span>
+                  <strong>{t('全部分类')}</strong>
+                  <small>${summary.totalAmount}</small>
+                </button>
+                {categoryCards.map((card) => (
+                  <button
+                    className={categoryFilter === card.key ? 'active' : ''}
+                    key={card.key}
+                    onClick={() => setCategoryFilter(card.key)}
+                    style={{ '--category-color': card.color } as CSSProperties}
+                    type="button"
+                  >
+                    <span className="sub-account-usage-category-letter">{card.name[0]}</span>
+                    <strong>{card.name}</strong>
+                    <small>${card.amount.toFixed(4)}</small>
+                  </button>
+                ))}
+              </div>
+              {visibleRows.length ? (
                 <div className="table-wrap">
                   <table className="sub-account-usage-table">
                     <thead>
                       <tr>
-                        <th>{t('平台')}</th>
+                        <th>{t('分类')}</th>
                         <th>{t('模型')}</th>
                         <th>{t('匹配标签')}</th>
                         <th>{t('渠道记录')}</th>
+                        <th>{t('请求记录')}</th>
                         <th>{t('消耗总量')}</th>
                         <th>{t('占比')}</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {summary.rows.map((row) => (
+                      {visibleRows.map((row) => (
                         <tr key={`${row.category}-${row.model}`}>
-                          <td>{row.category ? categoryLabel(row.category, language) : '-'}</td>
-                          <td><code>{row.model || t('全部模型')}</code></td>
+                          <td>{selectedCategoryCard?.name || (row.category ? categoryLabel(row.category, language) : '-')}</td>
+                          <td><code>{row.model || t('未归属模型')}</code></td>
                           <td>{formatInteger(row.tagCount)}</td>
                           <td>{formatInteger(row.channelCount)}</td>
+                          <td>{formatInteger(row.requestCount)}</td>
                           <td className="sub-account-usage-amount">${row.amount}</td>
                           <td>
                             <span className="sub-account-usage-share">
@@ -4148,10 +4249,13 @@ function SubAccountUsageDialog({
                   </table>
                 </div>
               ) : (
-                <div className="sub-account-usage-state empty"><Inbox size={30} /><p>{t('该用户暂无匹配标签的渠道消耗')}</p></div>
+                <div className="sub-account-usage-state empty">
+                  <Inbox size={30} />
+                  <p>{t(categoryFilter === 'all' ? '该用户暂无匹配标签的渠道消耗' : '该分类暂无模型消耗')}</p>
+                </div>
               )}
               <p className="sub-account-usage-source">
-                {t('统计口径：按标签前缀 {{prefix}}* 查询渠道，并按平台和模型汇总累计消耗。', { prefix: summary.queryPrefix })}
+                {t('统计口径：按标签前缀 {{prefix}}* 查询渠道，再读取渠道消费日志，并按分类和实际模型汇总累计消耗。', { prefix: summary.queryPrefix })}
               </p>
             </>
           )}

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -656,28 +657,6 @@ def quota_dollars(value: Decimal) -> str:
     return f"{value / Decimal(500_000):.4f}"
 
 
-def channel_model_label(channel: dict[str, Any]) -> str:
-    for field in ("model_name", "model", "models"):
-        value = channel.get(field)
-        if isinstance(value, list):
-            models = [str(item).strip() for item in value if str(item).strip()]
-            if models:
-                return ", ".join(models)
-        if isinstance(value, str) and value.strip():
-            text = value.strip()
-            if text.startswith("["):
-                try:
-                    parsed = json.loads(text)
-                except json.JSONDecodeError:
-                    parsed = None
-                if isinstance(parsed, list):
-                    models = [str(item).strip() for item in parsed if str(item).strip()]
-                    if models:
-                        return ", ".join(models)
-            return ", ".join(part.strip() for part in text.split(",") if part.strip())
-    return ""
-
-
 def extract_tags(data: Any) -> list[str]:
     values = data if isinstance(data, list) else data.get("items", data.get("tags", [])) if isinstance(data, dict) else []
     tags: set[str] = set()
@@ -686,6 +665,58 @@ def extract_tags(data: Any) -> list[str]:
         if isinstance(candidate, str) and candidate.strip():
             tags.add(candidate.strip())
     return sorted(tags)
+
+
+async def channel_model_usage(session: sqlite3.Row, channel_id: int) -> dict[str, Any]:
+    page = 1
+    loaded = 0
+    models: dict[str, dict[str, Any]] = {}
+    seen_log_ids: set[int] = set()
+    request_count = 0
+    while True:
+        query = urlencode({"page": page, "page_size": 200, "type": 0})
+        data = await authorized_json(session, f"/api/channels/{channel_id}/logs?{query}")
+        if not isinstance(data, dict) or not isinstance(data.get("items"), list):
+            raise BackendError(502, "模型消耗日志格式不正确，无法准确统计")
+        try:
+            total = int(data.get("total", 0))
+            current_page = int(data.get("page", page))
+            page_size = int(data.get("page_size", 200))
+        except (TypeError, ValueError) as error:
+            raise BackendError(502, "模型消耗日志分页不完整，请刷新重试") from error
+        if total < 0 or current_page != page or page_size <= 0:
+            raise BackendError(502, "模型消耗日志分页不完整，请刷新重试")
+        page_items = data["items"]
+        for log in page_items:
+            if not isinstance(log, dict):
+                raise BackendError(502, "模型消耗日志格式不正确，无法准确统计")
+            raw_log_id = log.get("id")
+            if raw_log_id is not None:
+                try:
+                    log_id = int(raw_log_id)
+                except (TypeError, ValueError) as error:
+                    raise BackendError(502, "模型消耗日志格式不正确，无法准确统计") from error
+                if log_id in seen_log_ids:
+                    continue
+                seen_log_ids.add(log_id)
+            model = str(log.get("model_name") or log.get("model") or "").strip()
+            model_usage = models.setdefault(model, {"quota": Decimal(0), "requestCount": 0})
+            model_usage["quota"] += quota_decimal(
+                log.get("quota", log.get("used_quota", 0))
+            )
+            model_usage["requestCount"] += 1
+            request_count += 1
+        loaded += len(page_items)
+        if loaded >= total:
+            break
+        if not page_items:
+            raise BackendError(502, "模型消耗日志分页不完整，请刷新重试")
+        page += 1
+    return {
+        "models": models,
+        "quota": sum((item["quota"] for item in models.values()), Decimal(0)),
+        "requestCount": request_count,
+    }
 
 
 async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[str, Any]:
@@ -707,9 +738,8 @@ async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[st
 
     tag_pattern = re.compile(rf"^{target_id}-(?P<category>[a-z0-9_]+)-\d{{6}}$", re.IGNORECASE)
     matching_tags = [tag for tag in extract_tags(await authorized_json(session, "/api/channels/tags")) if tag_pattern.fullmatch(tag)]
-    grouped: dict[tuple[str, str], dict[str, Any]] = {}
     seen_channel_ids: set[int] = set()
-    total_quota = Decimal(0)
+    channels: list[dict[str, Any]] = []
 
     for tag in matching_tags:
         match = tag_pattern.fullmatch(tag)
@@ -741,23 +771,14 @@ async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[st
                     continue
                 seen_channel_ids.add(channel_id)
                 category = str(channel.get("category") or tag_category).strip().lower()
-                model = channel_model_label(channel)
-                quota = quota_decimal(channel.get("used_quota", channel.get("quota", 0)))
-                key = (category, model)
-                group = grouped.setdefault(
-                    key,
+                channels.append(
                     {
+                        "id": channel_id,
                         "category": category,
-                        "model": model,
-                        "quota": Decimal(0),
-                        "channelCount": 0,
-                        "tags": set(),
-                    },
+                        "tag": tag,
+                        "quota": quota_decimal(channel.get("used_quota", channel.get("quota", 0))),
+                    }
                 )
-                group["quota"] += quota
-                group["channelCount"] += 1
-                group["tags"].add(tag)
-                total_quota += quota
             loaded += len(page_items)
             if loaded >= total:
                 break
@@ -765,7 +786,73 @@ async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[st
                 raise BackendError(502, "渠道分页数据不完整，请刷新重试")
             page += 1
 
+    semaphore = asyncio.Semaphore(4)
+
+    async def load_model_usage(channel: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        async with semaphore:
+            usage = await channel_model_usage(session, channel["id"])
+        return channel, usage
+
+    usage_results = await asyncio.gather(*(load_model_usage(channel) for channel in channels))
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    categories: dict[str, dict[str, Any]] = {}
+    total_quota = Decimal(0)
+    total_requests = 0
+
+    def add_usage(
+        channel: dict[str, Any],
+        model: str,
+        quota: Decimal,
+        request_count: int,
+    ) -> None:
+        key = (channel["category"], model)
+        group = grouped.setdefault(
+            key,
+            {
+                "category": channel["category"],
+                "model": model,
+                "quota": Decimal(0),
+                "channelIds": set(),
+                "tags": set(),
+                "requestCount": 0,
+            },
+        )
+        group["quota"] += quota
+        group["channelIds"].add(channel["id"])
+        group["tags"].add(channel["tag"])
+        group["requestCount"] += request_count
+
+    for channel, usage in usage_results:
+        logged_quota = usage["quota"]
+        channel_quota = channel["quota"]
+        effective_quota = max(channel_quota, logged_quota)
+        total_quota += effective_quota
+        total_requests += usage["requestCount"]
+        category = categories.setdefault(
+            channel["category"],
+            {
+                "category": channel["category"],
+                "quota": Decimal(0),
+                "channelIds": set(),
+                "tags": set(),
+                "models": set(),
+                "requestCount": 0,
+            },
+        )
+        category["quota"] += effective_quota
+        category["channelIds"].add(channel["id"])
+        category["tags"].add(channel["tag"])
+        category["requestCount"] += usage["requestCount"]
+        for model, model_usage in usage["models"].items():
+            add_usage(channel, model, model_usage["quota"], model_usage["requestCount"])
+            category["models"].add(model)
+        unattributed = max(Decimal(0), channel_quota - logged_quota)
+        if unattributed:
+            add_usage(channel, "", unattributed, 0)
+            category["models"].add("")
+
     rows = sorted(grouped.values(), key=lambda item: (-item["quota"], item["category"], item["model"]))
+    category_rows = sorted(categories.values(), key=lambda item: (-item["quota"], item["category"]))
     listed_quota = quota_decimal(source.get("used_quota")) if "used_quota" in source else None
     return {
         "totalAmount": quota_dollars(total_quota),
@@ -773,15 +860,28 @@ async def sub_account_tag_usage(session: sqlite3.Row, target_id: int) -> dict[st
         "amountsDiffer": listed_quota is not None and listed_quota != total_quota,
         "channelCount": len(seen_channel_ids),
         "tagCount": len(matching_tags),
-        "platformCount": len({row["category"] for row in rows}),
+        "platformCount": len(categories),
         "modelCount": len(rows),
+        "requestCount": total_requests,
         "queryPrefix": f"{target_id}-",
+        "categories": [
+            {
+                "category": category["category"],
+                "channelCount": len(category["channelIds"]),
+                "tagCount": len(category["tags"]),
+                "modelCount": len(category["models"]),
+                "requestCount": category["requestCount"],
+                "amount": quota_dollars(category["quota"]),
+            }
+            for category in category_rows
+        ],
         "rows": [
             {
                 "category": row["category"],
                 "model": row["model"],
-                "channelCount": row["channelCount"],
+                "channelCount": len(row["channelIds"]),
                 "tagCount": len(row["tags"]),
+                "requestCount": row["requestCount"],
                 "amount": quota_dollars(row["quota"]),
                 "sharePercent": f"{(row['quota'] / total_quota * 100) if total_quota else 0:.2f}",
             }
