@@ -22,6 +22,7 @@ COOKIE_NAME = "key_system_session"
 DAY_MS = 86_400_000
 DEFAULT_ACCOUNT_ALIASES = (
     ("sanyeyuanqi", "hhxxzz4", "sanyeyuanqi"),
+    ("okoko", "okoko", "okoko"),
 )
 PUBLIC_AUTH = {
     "/api/auth/login-captcha",
