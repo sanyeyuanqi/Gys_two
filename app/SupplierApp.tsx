@@ -206,6 +206,7 @@ type DailyStats = {
 type SubAccount = {
   id: number;
   username: string;
+  original_username?: string;
   display_name?: string;
   channel_count?: number;
   used_quota?: number;
@@ -498,6 +499,7 @@ const englishTranslations: Record<string, string> = {
   '删除 {{name}}': 'Delete {{name}}',
   '请输入用户名': 'Enter a username',
   '映射用户名': 'Mapped Username',
+  '原始用户名': 'Original Username',
   '登录用户名（映射）': 'Login username (mapped)',
   '映射用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
   '请输入显示名': 'Enter a display name',
@@ -4184,6 +4186,10 @@ function EditSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
+            <span>{t('原始用户名')}</span>
+            <input disabled value={account.original_username || '-'} />
+          </label>
+          <label>
             <span>{t('映射用户名')}</span>
             <input
               autoComplete="off"
@@ -4383,6 +4389,7 @@ function SubAccountsView() {
               <thead>
                 <tr>
                   <th>ID</th>
+                  <th>{t('原始用户名')}</th>
                   <th>{t('映射用户名')}</th>
                   <th>{t('显示名')}</th>
                   <th>{t('渠道数')}</th>
@@ -4395,6 +4402,7 @@ function SubAccountsView() {
                 {items.map((item) => (
                   <tr key={item.id}>
                     <td>{item.id}</td>
+                    <td>{item.original_username || '-'}</td>
                     <td>{item.username}</td>
                     <td>{item.display_name || '-'}</td>
                     <td>{item.channel_count || 0}</td>

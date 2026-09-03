@@ -394,6 +394,7 @@ class SessionStore:
             self.connection.commit()
         return {
             **item,
+            "original_username": upstream_username,
             "username": str(alias["public_username"]),
             "display_name": str(alias["display_name"] or alias["public_username"]),
         }
@@ -1010,7 +1011,12 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                     created_id = int(data.get("id", data.get("user_id")))
                 except (TypeError, ValueError):
                     created_id = None
-                data = {**data, "username": username, "display_name": display_name}
+                data = {
+                    **data,
+                    "original_username": upstream_username,
+                    "username": username,
+                    "display_name": display_name,
+                }
             store.attach_sub_account_alias(upstream_username, created_id)
             return success_response(request, request_id, sanitize_data(data), cookie)
 
