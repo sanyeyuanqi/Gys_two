@@ -755,8 +755,6 @@ async def sub_account_tag_usage(
     seen_channel_ids: set[int] = set()
     channels: list[dict[str, Any]] = []
 
-    channel_query_semaphore = asyncio.Semaphore(4)
-
     async def load_category_channels(category: str) -> list[dict[str, Any]]:
         query_tag = f"{target_id}-{category}"
         category_channels: list[dict[str, Any]] = []
@@ -764,8 +762,7 @@ async def sub_account_tag_usage(
         loaded = 0
         while True:
             query = urlencode({"page": page, "page_size": 500, "tag": query_tag})
-            async with channel_query_semaphore:
-                data = await authorized_json(session, f"/api/channels?{query}")
+            data = await authorized_json(session, f"/api/channels?{query}")
             if not isinstance(data, dict) or not isinstance(data.get("items"), list):
                 raise BackendError(502, "渠道数据格式不正确，无法准确统计")
             try:
@@ -826,7 +823,17 @@ async def sub_account_tag_usage(
 
     usage_results = await asyncio.gather(*(load_model_usage(channel) for channel in channels))
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
-    categories: dict[str, dict[str, Any]] = {}
+    categories: dict[str, dict[str, Any]] = {
+        category: {
+            "category": category,
+            "quota": Decimal(0),
+            "channelIds": set(),
+            "tags": set(),
+            "models": set(),
+            "requestCount": 0,
+        }
+        for category in category_filters
+    }
     total_quota = Decimal(0)
     total_requests = 0
 
@@ -883,7 +890,7 @@ async def sub_account_tag_usage(
             category["models"].add("")
 
     rows = sorted(grouped.values(), key=lambda item: (-item["quota"], item["category"], item["model"]))
-    category_rows = sorted(categories.values(), key=lambda item: (-item["quota"], item["category"]))
+    category_rows = [categories[category] for category in category_filters]
     listed_quota = quota_decimal(source.get("used_quota")) if "used_quota" in source else None
     return {
         "totalAmount": quota_dollars(total_quota),
@@ -891,7 +898,7 @@ async def sub_account_tag_usage(
         "amountsDiffer": listed_quota is not None and listed_quota != total_quota,
         "channelCount": len(seen_channel_ids),
         "tagCount": len(matching_tags),
-        "platformCount": len(categories),
+        "platformCount": sum(1 for category in category_rows if category["channelIds"]),
         "modelCount": len(rows),
         "requestCount": total_requests,
         "queryPrefix": (
