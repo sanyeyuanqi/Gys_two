@@ -127,6 +127,7 @@ class SessionStore:
                     sub_account_user_id INTEGER NOT NULL,
                     category TEXT NOT NULL,
                     rate_percent TEXT NOT NULL DEFAULT '100',
+                    settled_amount TEXT NOT NULL DEFAULT '0',
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (sub_account_user_id, category)
                 );
@@ -147,18 +148,32 @@ class SessionStore:
                         sub_account_user_id INTEGER NOT NULL,
                         category TEXT NOT NULL,
                         rate_percent TEXT NOT NULL DEFAULT '100',
+                        settled_amount TEXT NOT NULL DEFAULT '0',
                         updated_at INTEGER NOT NULL,
                         PRIMARY KEY (sub_account_user_id, category)
                     );
                     INSERT OR REPLACE INTO category_exchange_rates_by_id
-                        (sub_account_user_id, category, rate_percent, updated_at)
-                    SELECT sub_account_user_id, category, rate_percent, updated_at
+                        (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
+                    SELECT sub_account_user_id, category, rate_percent, '0', updated_at
                     FROM category_exchange_rates
                     ORDER BY updated_at ASC;
                     DROP TABLE category_exchange_rates;
                     ALTER TABLE category_exchange_rates_by_id
                         RENAME TO category_exchange_rates;
                     COMMIT;
+                    """
+                )
+            rate_columns = {
+                str(row["name"])
+                for row in self.connection.execute(
+                    "PRAGMA table_info(category_exchange_rates)"
+                ).fetchall()
+            }
+            if "settled_amount" not in rate_columns:
+                self.connection.execute(
+                    """
+                    ALTER TABLE category_exchange_rates
+                    ADD COLUMN settled_amount TEXT NOT NULL DEFAULT '0'
                     """
                 )
             alias_columns = {
@@ -573,10 +588,34 @@ class SessionStore:
                 rates[category] = value
         return rates
 
+    def category_settled_amounts(self, sub_account_user_id: int) -> dict[str, Decimal]:
+        with self.lock:
+            rows = self.connection.execute(
+                """
+                SELECT category, settled_amount
+                FROM category_exchange_rates
+                WHERE sub_account_user_id = ?
+                """,
+                (sub_account_user_id,),
+            ).fetchall()
+        amounts = {category: Decimal(0) for category in CHANNEL_USAGE_CATEGORIES}
+        for row in rows:
+            category = str(row["category"])
+            if category not in amounts:
+                continue
+            try:
+                value = Decimal(str(row["settled_amount"]))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if value.is_finite() and Decimal(0) <= value <= Decimal("1000000000000"):
+                amounts[category] = value
+        return amounts
+
     def save_category_rates(
         self,
         sub_account_user_id: int,
         rates: dict[str, Decimal],
+        settled_amounts: dict[str, Decimal],
     ) -> None:
         now = int(time.time() * 1000)
         values = []
@@ -584,15 +623,19 @@ class SessionStore:
             formatted = format(rates[category], "f")
             if "." in formatted:
                 formatted = formatted.rstrip("0").rstrip(".")
-            values.append((sub_account_user_id, category, formatted, now))
+            settled = format(settled_amounts[category], "f")
+            if "." in settled:
+                settled = settled.rstrip("0").rstrip(".")
+            values.append((sub_account_user_id, category, formatted, settled, now))
         with self.lock:
             self.connection.executemany(
                 """
                 INSERT INTO category_exchange_rates
-                    (sub_account_user_id, category, rate_percent, updated_at)
-                VALUES (?, ?, ?, ?)
+                    (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
+                VALUES (?, ?, ?, ?, ?)
                 ON CONFLICT(sub_account_user_id, category) DO UPDATE SET
                     rate_percent = excluded.rate_percent,
+                    settled_amount = excluded.settled_amount,
                     updated_at = excluded.updated_at
                 """,
                 values,
@@ -770,6 +813,10 @@ def quota_dollars(value: Decimal) -> str:
     return f"{value / Decimal(500_000):.4f}"
 
 
+def dollar_amount(value: Decimal) -> str:
+    return f"{value:.4f}"
+
+
 def decimal_text(value: Decimal) -> str:
     formatted = format(value, "f")
     return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
@@ -779,10 +826,15 @@ def category_rates_payload(
     sub_account_user_id: int,
 ) -> dict[str, Any]:
     rates = store.category_rates(sub_account_user_id)
+    settled_amounts = store.category_settled_amounts(sub_account_user_id)
     return {
         "userId": sub_account_user_id,
         "rates": [
-            {"category": category, "ratePercent": decimal_text(rates[category])}
+            {
+                "category": category,
+                "ratePercent": decimal_text(rates[category]),
+                "settledAmount": dollar_amount(settled_amounts[category]),
+            }
             for category in CHANNEL_USAGE_CATEGORIES
         ],
     }
@@ -850,6 +902,7 @@ async def sub_account_tag_usage(
         raise BackendError(400, "渠道分类无效")
     category_filters = (category_filter,) if category_filter else CHANNEL_USAGE_CATEGORIES
     category_rates = store.category_rates(target_id)
+    category_settled_amounts = store.category_settled_amounts(target_id)
 
     children = await authorized_json(session, "/api/sub-accounts")
     child_items = children if isinstance(children, list) else children.get("items", []) if isinstance(children, dict) else []
@@ -979,8 +1032,7 @@ async def sub_account_tag_usage(
     for channel, usage in usage_results:
         logged_quota = usage["quota"]
         channel_quota = channel["quota"]
-        rate_factor = category_rates[channel["category"]] / Decimal(100)
-        effective_quota = max(channel_quota, logged_quota) * rate_factor
+        effective_quota = max(channel_quota, logged_quota)
         total_quota += effective_quota
         total_requests += usage["requestCount"]
         category = categories.setdefault(
@@ -1002,11 +1054,11 @@ async def sub_account_tag_usage(
             add_usage(
                 channel,
                 model,
-                model_usage["quota"] * rate_factor,
+                model_usage["quota"],
                 model_usage["requestCount"],
             )
             category["models"].add(model)
-        unattributed = max(Decimal(0), channel_quota - logged_quota) * rate_factor
+        unattributed = max(Decimal(0), channel_quota - logged_quota)
         if unattributed:
             add_usage(channel, "", unattributed, 0)
             category["models"].add("")
@@ -1014,8 +1066,18 @@ async def sub_account_tag_usage(
     rows = sorted(grouped.values(), key=lambda item: (-item["quota"], item["category"], item["model"]))
     category_rows = [categories[category] for category in category_filters]
     listed_quota = quota_decimal(source.get("used_quota")) if "used_quota" in source else None
+    total_payable_amount = sum(
+        (
+            Decimal(quota_dollars(category["quota"]))
+            - category_settled_amounts[category["category"]]
+        )
+        * category_rates[category["category"]]
+        / Decimal(100)
+        for category in category_rows
+    )
     return {
         "totalAmount": quota_dollars(total_quota),
+        "totalPayableAmount": dollar_amount(total_payable_amount),
         "listedAmount": quota_dollars(listed_quota) if listed_quota is not None else None,
         "amountsDiffer": listed_quota is not None and listed_quota != total_quota,
         "channelCount": len(seen_channel_ids),
@@ -1037,6 +1099,17 @@ async def sub_account_tag_usage(
                 "requestCount": category["requestCount"],
                 "ratePercent": decimal_text(category_rates[category["category"]]),
                 "amount": quota_dollars(category["quota"]),
+                "settledAmount": dollar_amount(
+                    category_settled_amounts[category["category"]]
+                ),
+                "payableAmount": dollar_amount(
+                    (
+                        Decimal(quota_dollars(category["quota"]))
+                        - category_settled_amounts[category["category"]]
+                    )
+                    * category_rates[category["category"]]
+                    / Decimal(100)
+                ),
             }
             for category in category_rows
         ],
@@ -1508,9 +1581,16 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
 
             body = await read_body(request)
             raw_rates = body.get("rates")
+            raw_settled_amounts = body.get("settledAmounts")
             if not isinstance(raw_rates, dict) or set(raw_rates) != set(CHANNEL_USAGE_CATEGORIES):
                 raise BackendError(400, "请完整填写全部渠道分类汇率")
+            if (
+                not isinstance(raw_settled_amounts, dict)
+                or set(raw_settled_amounts) != set(CHANNEL_USAGE_CATEGORIES)
+            ):
+                raise BackendError(400, "请完整填写全部渠道分类已结算金额")
             parsed_rates: dict[str, Decimal] = {}
+            parsed_settled_amounts: dict[str, Decimal] = {}
             for category in CHANNEL_USAGE_CATEGORIES:
                 raw_value = raw_rates.get(category)
                 if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float, str)):
@@ -1522,7 +1602,21 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 if not value.is_finite() or value < 0 or value > Decimal("100000"):
                     raise BackendError(400, f"{category} 汇率须在 0% 至 100000% 之间")
                 parsed_rates[category] = value
-            store.save_category_rates(target_id, parsed_rates)
+                raw_settled = raw_settled_amounts.get(category)
+                if isinstance(raw_settled, bool) or not isinstance(raw_settled, (int, float, str)):
+                    raise BackendError(400, f"{category} 已结算金额格式不正确")
+                try:
+                    settled = Decimal(str(raw_settled).strip())
+                except (InvalidOperation, ValueError) as error:
+                    raise BackendError(400, f"{category} 已结算金额格式不正确") from error
+                if (
+                    not settled.is_finite()
+                    or settled < 0
+                    or settled > Decimal("1000000000000")
+                ):
+                    raise BackendError(400, f"{category} 已结算金额无效")
+                parsed_settled_amounts[category] = settled
+            store.save_category_rates(target_id, parsed_rates, parsed_settled_amounts)
             return success_response(
                 request,
                 request_id,

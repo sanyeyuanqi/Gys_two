@@ -866,7 +866,7 @@ textarea:focus {
 }
 
 .sub-account-rate-dialog {
-  width: min(760px, calc(100vw - 32px));
+  width: min(820px, calc(100vw - 32px));
   max-height: calc(100dvh - 40px);
   display: flex;
   flex-direction: column;
@@ -914,14 +914,14 @@ textarea:focus {
 
 .sub-account-rate-grid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
   gap: 9px;
 }
 
 .account-dialog .sub-account-rate-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(160px, 1fr) 130px 170px;
   align-items: center;
-  justify-content: space-between;
   gap: 14px;
   border: 1px solid #e4e7ec;
   border-radius: 7px;
@@ -953,17 +953,31 @@ textarea:focus {
   font-weight: 500;
 }
 
+.account-dialog .sub-account-rate-control {
+  display: grid;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
 .sub-account-rate-input {
-  width: 112px;
+  width: 100%;
   position: relative;
-  flex: 0 0 auto;
 }
 
 .account-dialog .sub-account-rate-input input {
   height: 34px;
-  padding-right: 30px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+.account-dialog .sub-account-rate-input.suffix input {
+  padding-right: 30px;
+}
+
+.account-dialog .sub-account-rate-input.prefix input {
+  padding-left: 27px;
 }
 
 .sub-account-rate-input b {
@@ -975,6 +989,11 @@ textarea:focus {
   font-weight: 600;
   transform: translateY(-50%);
   pointer-events: none;
+}
+
+.sub-account-rate-input.prefix b {
+  right: auto;
+  left: 10px;
 }
 
 .sub-account-rate-loading {
@@ -2049,10 +2068,28 @@ textarea:focus {
 }
 
 .sub-account-usage-categories small {
-  color: var(--blue);
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
+}
+
+.sub-account-usage-financials {
+  width: 100%;
+  display: grid;
+  gap: 3px;
+  text-align: center;
+}
+
+.sub-account-usage-financials .total {
+  color: var(--blue);
+}
+
+.sub-account-usage-financials .settled {
+  color: #667085;
+}
+
+.sub-account-usage-financials .payable {
+  color: #039855;
 }
 
 .sub-account-usage-table {
@@ -2132,8 +2169,12 @@ textarea:focus {
 }
 
 @media (max-width: 720px) {
-  .sub-account-rate-grid {
-    grid-template-columns: 1fr;
+  .account-dialog .sub-account-rate-row {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .sub-account-rate-name {
+    grid-column: 1 / -1;
   }
 
   .sub-account-usage-header,

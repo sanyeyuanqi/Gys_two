@@ -215,6 +215,7 @@ type SubAccount = {
 
 type SubAccountUsageSummary = {
   totalAmount: string;
+  totalPayableAmount?: string;
   listedAmount: string | null;
   amountsDiffer: boolean;
   channelCount: number;
@@ -231,6 +232,8 @@ type SubAccountUsageSummary = {
     requestCount: number;
     ratePercent?: string;
     amount: string;
+    settledAmount?: string;
+    payableAmount?: string;
   }>;
   rows: Array<{
     category: string;
@@ -248,6 +251,7 @@ type CategoryRateResponse = {
   rates: Array<{
     category: string;
     ratePercent: string;
+    settledAmount: string;
   }>;
 };
 
@@ -287,16 +291,21 @@ const englishTranslations: Record<string, string> = {
   '查看消耗': 'View Usage',
   '查看 {{name}} 的消耗': 'View usage for {{name}}',
   '设置汇率': 'Set Rates',
+  '汇率': 'Rate',
   '为 {{name}} 设置汇率': 'Set rates for {{name}}',
   '渠道分类汇率': 'Channel Category Rates',
+  '渠道分类汇率与结算': 'Channel Rates & Settlement',
   '为该用户分别设置每个渠道分类的金额汇率。': 'Set an amount rate for each channel category for this user.',
+  '为该用户分别设置每个渠道分类的汇率与已结算金额。': 'Set the rate and settled amount for each channel category for this user.',
   '汇率保存成功': 'Rates saved successfully',
   '加载汇率失败': 'Failed to load rates',
   '保存汇率失败': 'Failed to save rates',
   '正在加载汇率': 'Loading rates',
   '保存汇率': 'Save Rates',
   '汇率须在 0% 至 100000% 之间': 'Rates must be between 0% and 100000%',
+  '已结算金额须为大于或等于 0 的数字': 'Settled amounts must be numbers greater than or equal to 0',
   '100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。': '100% keeps the original usage amount. Category and model amounts in View Usage are multiplied by this rate.',
+  '应付 =（总消耗 - 已结算）× 汇率。': 'Payable = (total usage - settled) × rate.',
   '平台模型消耗': 'Platform & Model Usage',
   '消耗总量': 'Total Usage',
   '涉及平台': 'Platforms',
@@ -308,6 +317,9 @@ const englishTranslations: Record<string, string> = {
   '渠道分类模型消耗': 'Model Usage by Channel Category',
   '渠道分类总消耗': 'Total Usage by Channel Category',
   '总消耗': 'Total Usage',
+  '已结算': 'Settled',
+  '应付': 'Payable',
+  '已结算金额': 'Settled Amount',
   '渠道分类': 'Channel Category',
   '涉及分类': 'Categories',
   '未归属模型': 'Unattributed Model',
@@ -4116,7 +4128,11 @@ function SubAccountUsageDialog({
                   >
                     <span className="sub-account-usage-category-letter">{category.name[0]}</span>
                     <strong>{category.name}</strong>
-                    <small>{t('总消耗')} ${category.stats?.amount || '0.0000'}</small>
+                    <span className="sub-account-usage-financials">
+                      <small className="total">{t('总消耗')} ${category.stats?.amount || '0.0000'}</small>
+                      <small className="settled">{t('已结算')} ${category.stats?.settledAmount || '0.0000'}</small>
+                      <small className="payable">{t('应付')} ${category.stats?.payableAmount || '0.0000'}</small>
+                    </span>
                   </button>
                 ))}
               </div>
@@ -4179,6 +4195,9 @@ function SubAccountRateDialog({
   const [rates, setRates] = useState<Record<string, string>>(() => Object.fromEntries(
     channelUsageCategories.map((category) => [category, '100']),
   ));
+  const [settledAmounts, setSettledAmounts] = useState<Record<string, string>>(() => Object.fromEntries(
+    channelUsageCategories.map((category) => [category, '0']),
+  ));
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -4196,6 +4215,10 @@ function SubAccountRateDialog({
         setRates(Object.fromEntries(channelUsageCategories.map((category) => [
           category,
           value.rates.find((item) => item.category === category)?.ratePercent || '100',
+        ])));
+        setSettledAmounts(Object.fromEntries(channelUsageCategories.map((category) => [
+          category,
+          value.rates.find((item) => item.category === category)?.settledAmount || '0',
         ])));
       })
       .catch((failure) => {
@@ -4219,12 +4242,20 @@ function SubAccountRateDialog({
       setError(t('汇率须在 0% 至 100000% 之间'));
       return;
     }
+    const invalidSettledAmount = channelUsageCategories.some((category) => {
+      const value = Number(settledAmounts[category]);
+      return !Number.isFinite(value) || value < 0 || value > 1_000_000_000_000;
+    });
+    if (invalidSettledAmount) {
+      setError(t('已结算金额须为大于或等于 0 的数字'));
+      return;
+    }
     setSaving(true);
     setError('');
     try {
       await api(`/api/sub-accounts/${account.id}/category-rates`, {
         method: 'PUT',
-        body: { rates },
+        body: { rates, settledAmounts },
       });
       onSaved();
     } catch (failure) {
@@ -4250,7 +4281,7 @@ function SubAccountRateDialog({
       >
         <div className="account-dialog-header sub-account-rate-header">
           <div>
-            <h2 id="sub-account-rate-title"><CircleDollarSign size={20} />{t('渠道分类汇率')}</h2>
+            <h2 id="sub-account-rate-title"><CircleDollarSign size={20} />{t('渠道分类汇率与结算')}</h2>
             <p>{account.display_name || account.username} · ID {account.id}</p>
           </div>
           <button aria-label={t('关闭')} disabled={saving} onClick={onClose} type="button"><X size={18} /></button>
@@ -4261,35 +4292,57 @@ function SubAccountRateDialog({
           </div>
         ) : (
           <form onSubmit={submit}>
-            <p className="sub-account-rate-description">{t('为该用户分别设置每个渠道分类的金额汇率。')}</p>
+            <p className="sub-account-rate-description">{t('为该用户分别设置每个渠道分类的汇率与已结算金额。')}</p>
             <div className="sub-account-rate-grid">
               {channelUsageCategories.map((category) => (
-                <label className="sub-account-rate-row" key={category}>
+                <div className="sub-account-rate-row" key={category}>
                   <span className="sub-account-rate-name">
                     <strong>{categoryLabel(category, language)}</strong>
                     <small>{category}</small>
                   </span>
-                  <span className="sub-account-rate-input">
-                    <input
-                      inputMode="decimal"
-                      max="100000"
-                      min="0"
-                      onChange={(event) => setRates((current) => ({
-                        ...current,
-                        [category]: event.target.value,
-                      }))}
-                      required
-                      step="0.01"
-                      type="number"
-                      value={rates[category]}
-                    />
-                    <b>%</b>
-                  </span>
-                </label>
+                  <label className="sub-account-rate-control">
+                    <span>{t('汇率')}</span>
+                    <span className="sub-account-rate-input suffix">
+                      <input
+                        inputMode="decimal"
+                        max="100000"
+                        min="0"
+                        onChange={(event) => setRates((current) => ({
+                          ...current,
+                          [category]: event.target.value,
+                        }))}
+                        required
+                        step="0.01"
+                        type="number"
+                        value={rates[category]}
+                      />
+                      <b>%</b>
+                    </span>
+                  </label>
+                  <label className="sub-account-rate-control settled">
+                    <span>{t('已结算金额')}</span>
+                    <span className="sub-account-rate-input prefix">
+                      <input
+                        inputMode="decimal"
+                        max="1000000000000"
+                        min="0"
+                        onChange={(event) => setSettledAmounts((current) => ({
+                          ...current,
+                          [category]: event.target.value,
+                        }))}
+                        required
+                        step="0.0001"
+                        type="number"
+                        value={settledAmounts[category]}
+                      />
+                      <b>$</b>
+                    </span>
+                  </label>
+                </div>
               ))}
             </div>
             <p className="sub-account-rate-hint">
-              {t('100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。')}
+              {t('应付 =（总消耗 - 已结算）× 汇率。')}
             </p>
             {error && <p className="account-dialog-error" role="alert">{error}</p>}
             <div className="account-dialog-actions">
