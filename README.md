@@ -58,8 +58,26 @@ npm run dev:web
 npm run db:stop
 ```
 
-线上部署前需要把 FastAPI 部署到可访问的 Python 服务器，并设置
-`GYS_FASTAPI_ORIGIN`；Sites 本身只托管前端转发层，不能运行 Python 进程。
+## 服务器 Docker 部署
+
+服务器准备好 Docker 与外部网络 `gys-network` 后，在项目根目录创建 `.env`：
+
+```env
+POSTGRES_PASSWORD=请设置独立的强密码
+GYS_PUBLIC_ORIGIN=https://你的域名
+```
+
+然后执行：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build --wait
+```
+
+部署会创建 `gys-postgres`、`gys-backend` 和 `gys-frontend` 三个容器；PostgreSQL
+数据持久化在 `/data/gys-system/postgres`。Nginx 只需在 `gys-network` 中转发到
+`gys-frontend:3000`。
+
+前端通过 `gys-network` 内部网络访问 FastAPI，PostgreSQL 不暴露公网端口。
 
 ## 质量检查
 
