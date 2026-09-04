@@ -1965,12 +1965,6 @@ textarea:focus {
   color: var(--blue);
 }
 
-.sub-account-usage-header p {
-  margin: 7px 0 0;
-  color: var(--muted);
-  font-size: 13px;
-}
-
 .sub-account-usage-tools {
   display: flex;
   flex: 0 0 auto;

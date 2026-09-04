@@ -4086,7 +4086,6 @@ function SubAccountUsageDialog({
         <header className="sub-account-usage-header">
           <div>
             <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('渠道分类总消耗')}</h2>
-            <p>{account.display_name || account.username} · {t('本站用户名')} {account.username} · ID {account.id}</p>
           </div>
           <div className="sub-account-usage-tools">
             <button
