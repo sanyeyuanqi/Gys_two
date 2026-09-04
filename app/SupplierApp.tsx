@@ -246,6 +246,18 @@ type SubAccountUsageSummary = {
   }>;
 };
 
+type SettlementRecord = {
+  id: number;
+  category: string;
+  previousAmount: string;
+  settledAmount: string;
+  changeAmount: string;
+  consumptionAmount: string;
+  ratePercent: string;
+  settlementAmount: string;
+  createdAt: number;
+};
+
 type CategoryRateResponse = {
   userId: number;
   rates: Array<{
@@ -253,15 +265,19 @@ type CategoryRateResponse = {
     ratePercent: string;
     settledAmount: string;
   }>;
-  settlementRecords: Array<{
-    id: number;
+  settlementRecords: SettlementRecord[];
+};
+
+type SettlementResponse = {
+  settlement: SettlementRecord;
+  category: {
     category: string;
-    previousAmount: string;
+    totalAmount: string;
     settledAmount: string;
-    changeAmount: string;
+    outstandingAmount: string;
     ratePercent: string;
-    createdAt: number;
-  }>;
+    payableAmount: string;
+  };
 };
 
 type Notice = {
@@ -299,6 +315,25 @@ const englishTranslations: Record<string, string> = {
   '操作': 'Actions',
   '查看消耗': 'View Usage',
   '查看 {{name}} 的消耗': 'View usage for {{name}}',
+  '结算': 'Settle',
+  '为 {{name}} 结算': 'Settle usage for {{name}}',
+  '渠道分类结算': 'Channel Category Settlement',
+  '正在加载结算数据': 'Loading settlement data',
+  '加载结算数据失败': 'Failed to load settlement data',
+  '提交结算失败': 'Failed to submit settlement',
+  '确认结算': 'Confirm Settlement',
+  '结算中...': 'Settling...',
+  '结算成功，本次结算金额 ${{amount}}': 'Settlement saved. Amount: ${{amount}}',
+  '本次消耗额度': 'Usage to Settle',
+  '可结算消耗': 'Available Usage',
+  '当前汇率': 'Current Rate',
+  '本次结算金额': 'Settlement Amount',
+  '结算金额': 'Settlement Amount',
+  '结算汇率': 'Settlement Rate',
+  '结算后累计': 'Cumulative Settled',
+  '请输入有效的结算消耗额度': 'Enter a valid usage amount to settle',
+  '结算消耗额度不能超过可结算额度': 'Usage to settle cannot exceed the available amount',
+  '本次结算金额 = 消耗额度 × 结算汇率。': 'Settlement amount = usage amount × settlement rate.',
   '设置汇率': 'Set Rates',
   '汇率': 'Rate',
   '为 {{name}} 设置汇率': 'Set rates for {{name}}',
@@ -337,6 +372,7 @@ const englishTranslations: Record<string, string> = {
   '变更后': 'After',
   '变更金额': 'Change',
   '保存时汇率': 'Rate at Save',
+  '消耗额度': 'Usage Amount',
   '渠道分类': 'Channel Category',
   '涉及分类': 'Categories',
   '未归属模型': 'Unattributed Model',
@@ -1083,13 +1119,6 @@ function formatBeijingDateTime(value: number, language: Language = 'zh') {
     second: '2-digit',
     hour12: false,
   });
-}
-
-function formatSignedDollar(value: string) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return '$0.0000';
-  const sign = amount > 0 ? '+' : amount < 0 ? '-' : '';
-  return `${sign}$${Math.abs(amount).toFixed(4)}`;
 }
 
 function buildUploadTagPreview(userId: number, category: string, timestamp: number) {
@@ -4225,6 +4254,261 @@ function SubAccountUsageDialog({
   );
 }
 
+function SubAccountSettlementDialog({
+  account,
+  onClose,
+}: {
+  account: SubAccount;
+  onClose: () => void;
+}) {
+  const { language, t } = useLanguage();
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [summary, setSummary] = useState<SubAccountUsageSummary | null>(null);
+  const [records, setRecords] = useState<SettlementRecord[]>([]);
+  const [category, setCategory] = useState(channelUsageCategories[0]);
+  const [consumptionAmount, setConsumptionAmount] = useState('');
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+
+  const categoryStats = useMemo(
+    () => summary?.categories.find((item) => item.category === category),
+    [category, summary],
+  );
+  const totalAmount = Number(categoryStats?.amount || 0);
+  const settledAmount = Number(categoryStats?.settledAmount || 0);
+  const availableAmount = Math.max(0, totalAmount - settledAmount);
+  const ratePercent = Number(categoryStats?.ratePercent || 100);
+  const settlementAmount = Math.max(0, Number(consumptionAmount) || 0) * ratePercent / 100;
+  const visibleRecords = useMemo(
+    () => records.filter((record) => record.category === category),
+    [category, records],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    setNotice('');
+    Promise.all([
+      api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage`, {
+        fresh: true,
+        signal: controller.signal,
+      }),
+      api<CategoryRateResponse>(`/api/sub-accounts/${account.id}/category-rates`, {
+        fresh: true,
+        signal: controller.signal,
+      }),
+    ])
+      .then(([usage, rateData]) => {
+        if (controller.signal.aborted) return;
+        setSummary(usage);
+        setRecords(rateData.settlementRecords || []);
+      })
+      .catch((failure) => {
+        if (!controller.signal.aborted) {
+          setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [account.id, attempt, t]);
+
+  useEffect(() => {
+    if (!summary) return;
+    setConsumptionAmount(availableAmount.toFixed(4));
+    setError('');
+  }, [availableAmount, category, summary]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const amount = Number(consumptionAmount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      setError(t('请输入有效的结算消耗额度'));
+      return;
+    }
+    if (amount > availableAmount + 0.0000001) {
+      setError(t('结算消耗额度不能超过可结算额度'));
+      return;
+    }
+    setSaving(true);
+    setError('');
+    setNotice('');
+    try {
+      const result = await api<SettlementResponse>(`/api/sub-accounts/${account.id}/settlements`, {
+        method: 'POST',
+        body: { category, consumptionAmount },
+      });
+      setRecords((current) => [result.settlement, ...current]);
+      setSummary((current) => {
+        if (!current) return current;
+        const categories = current.categories.map((item) => item.category === category ? {
+          ...item,
+          amount: result.category.totalAmount,
+          settledAmount: result.category.settledAmount,
+          ratePercent: result.category.ratePercent,
+          payableAmount: result.category.payableAmount,
+        } : item);
+        return {
+          ...current,
+          categories,
+          totalPayableAmount: categories.reduce(
+            (total, item) => total + Number(item.payableAmount || 0),
+            0,
+          ).toFixed(4),
+        };
+      });
+      setConsumptionAmount(result.category.outstandingAmount);
+      setNotice(t('结算成功，本次结算金额 ${{amount}}', {
+        amount: result.settlement.settlementAmount,
+      }));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('提交结算失败'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+      role="presentation"
+    >
+      <section
+        aria-labelledby="sub-account-settlement-title"
+        aria-modal="true"
+        className="account-dialog sub-account-settlement-dialog"
+        role="dialog"
+      >
+        <div className="account-dialog-header sub-account-rate-header">
+          <div>
+            <h2 id="sub-account-settlement-title"><CheckCircle2 size={20} />{t('渠道分类结算')}</h2>
+          </div>
+          <div className="sub-account-usage-tools">
+            <button
+              aria-label={t('刷新')}
+              disabled={loading || saving}
+              onClick={() => setAttempt((value) => value + 1)}
+              title={t('刷新')}
+              type="button"
+            >
+              <RefreshCcw className={loading ? 'spin' : ''} size={17} />
+            </button>
+            <button aria-label={t('关闭')} disabled={saving} onClick={onClose} title={t('关闭')} type="button">
+              <X size={19} />
+            </button>
+          </div>
+        </div>
+        {loading ? (
+          <div className="sub-account-rate-loading" role="status">
+            <Loader2 className="spin" size={22} />{t('正在加载结算数据')}
+          </div>
+        ) : !summary ? (
+          <div className="sub-account-rate-loading error" role="alert">
+            <AlertTriangle size={22} />{error || t('加载结算数据失败')}
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <label className="sub-account-settlement-category">
+              <span>{t('渠道分类')}</span>
+              <select
+                disabled={saving}
+                onChange={(event) => {
+                  setCategory(event.target.value);
+                  setNotice('');
+                }}
+                value={category}
+              >
+                {channelUsageCategories.map((item) => (
+                  <option key={item} value={item}>{categoryLabel(item, language)}</option>
+                ))}
+              </select>
+            </label>
+            <div className="sub-account-settlement-summary">
+              <span><small>{t('总消耗')}</small><strong>${categoryStats?.amount || '0.0000'}</strong></span>
+              <span><small>{t('已结算')}</small><strong>${categoryStats?.settledAmount || '0.0000'}</strong></span>
+              <span><small>{t('可结算消耗')}</small><strong>${availableAmount.toFixed(4)}</strong></span>
+              <span><small>{t('当前汇率')}</small><strong>{categoryStats?.ratePercent || '100'}%</strong></span>
+            </div>
+            <div className="sub-account-settlement-calculation">
+              <label>
+                <span>{t('本次消耗额度')}</span>
+                <span className="sub-account-rate-input prefix">
+                  <input
+                    disabled={saving || availableAmount <= 0}
+                    inputMode="decimal"
+                    max={availableAmount.toFixed(4)}
+                    min="0.0001"
+                    onChange={(event) => setConsumptionAmount(event.target.value)}
+                    required
+                    step="0.0001"
+                    type="number"
+                    value={consumptionAmount}
+                  />
+                  <b>$</b>
+                </span>
+              </label>
+              <span className="sub-account-settlement-result">
+                <small>{t('本次结算金额')}</small>
+                <strong>${settlementAmount.toFixed(4)}</strong>
+              </span>
+            </div>
+            <p className="sub-account-rate-hint">{t('本次结算金额 = 消耗额度 × 结算汇率。')}</p>
+            {notice && <p className="sub-account-settlement-notice" role="status"><CheckCircle2 size={16} />{notice}</p>}
+            {error && <p className="account-dialog-error" role="alert">{error}</p>}
+            <section className="sub-account-settlement-history">
+              <h3>{t('结算记录')}</h3>
+              {visibleRecords.length > 0 ? (
+                <div className="table-wrap sub-account-settlement-history-table-wrap">
+                  <table className="sub-account-settlement-history-table">
+                    <thead>
+                      <tr>
+                        <th>{t('结算时间')}</th>
+                        <th>{t('消耗额度')}</th>
+                        <th>{t('结算汇率')}</th>
+                        <th>{t('结算金额')}</th>
+                        <th>{t('结算后累计')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {visibleRecords.map((record) => (
+                        <tr key={record.id}>
+                          <td>{formatBeijingDateTime(record.createdAt, language)}</td>
+                          <td>${record.consumptionAmount}</td>
+                          <td>{record.ratePercent}%</td>
+                          <td className={Number(record.settlementAmount) < 0 ? 'negative' : 'positive'}>
+                            ${record.settlementAmount}
+                          </td>
+                          <td>${record.settledAmount}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="sub-account-settlement-history-empty">{t('暂无结算记录')}</p>
+              )}
+            </section>
+            <div className="account-dialog-actions">
+              <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('关闭')}</button>
+              <button className="primary-button compact" disabled={saving || availableAmount <= 0} type="submit">
+                {saving && <Loader2 className="spin" size={16} />}
+                {t(saving ? '结算中...' : '确认结算')}
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function SubAccountRateDialog({
   account,
   onClose,
@@ -4237,9 +4521,6 @@ function SubAccountRateDialog({
   const { language, t } = useLanguage();
   const [rates, setRates] = useState<Record<string, string>>(() => Object.fromEntries(
     channelUsageCategories.map((category) => [category, '100']),
-  ));
-  const [settledAmounts, setSettledAmounts] = useState<Record<string, string>>(() => Object.fromEntries(
-    channelUsageCategories.map((category) => [category, '0']),
   ));
   const [settlementRecords, setSettlementRecords] = useState<CategoryRateResponse['settlementRecords']>([]);
   const [loading, setLoading] = useState(true);
@@ -4259,10 +4540,6 @@ function SubAccountRateDialog({
         setRates(Object.fromEntries(channelUsageCategories.map((category) => [
           category,
           value.rates.find((item) => item.category === category)?.ratePercent || '100',
-        ])));
-        setSettledAmounts(Object.fromEntries(channelUsageCategories.map((category) => [
-          category,
-          value.rates.find((item) => item.category === category)?.settledAmount || '0',
         ])));
         setSettlementRecords(value.settlementRecords || []);
       })
@@ -4287,20 +4564,12 @@ function SubAccountRateDialog({
       setError(t('汇率须在 0% 至 100000% 之间'));
       return;
     }
-    const invalidSettledAmount = channelUsageCategories.some((category) => {
-      const value = Number(settledAmounts[category]);
-      return !Number.isFinite(value) || value < 0 || value > 1_000_000_000_000;
-    });
-    if (invalidSettledAmount) {
-      setError(t('已结算金额须为大于或等于 0 的数字'));
-      return;
-    }
     setSaving(true);
     setError('');
     try {
       await api(`/api/sub-accounts/${account.id}/category-rates`, {
         method: 'PUT',
-        body: { rates, settledAmounts },
+        body: { rates },
       });
       onSaved();
     } catch (failure) {
@@ -4326,7 +4595,7 @@ function SubAccountRateDialog({
       >
         <div className="account-dialog-header sub-account-rate-header">
           <div>
-            <h2 id="sub-account-rate-title"><CircleDollarSign size={20} />{t('渠道分类汇率与结算')}</h2>
+            <h2 id="sub-account-rate-title"><CircleDollarSign size={20} />{t('渠道分类汇率')}</h2>
             <p>{account.display_name || account.username} · ID {account.id}</p>
           </div>
           <button aria-label={t('关闭')} disabled={saving} onClick={onClose} type="button"><X size={18} /></button>
@@ -4337,7 +4606,7 @@ function SubAccountRateDialog({
           </div>
         ) : (
           <form onSubmit={submit}>
-            <p className="sub-account-rate-description">{t('为该用户分别设置每个渠道分类的汇率与已结算金额。')}</p>
+            <p className="sub-account-rate-description">{t('为该用户分别设置每个渠道分类的金额汇率。')}</p>
             <div className="sub-account-rate-grid">
               {channelUsageCategories.map((category) => (
                 <div className="sub-account-rate-row" key={category}>
@@ -4364,30 +4633,11 @@ function SubAccountRateDialog({
                       <b>%</b>
                     </span>
                   </label>
-                  <label className="sub-account-rate-control settled">
-                    <span>{t('已结算金额')}</span>
-                    <span className="sub-account-rate-input prefix">
-                      <input
-                        inputMode="decimal"
-                        max="1000000000000"
-                        min="0"
-                        onChange={(event) => setSettledAmounts((current) => ({
-                          ...current,
-                          [category]: event.target.value,
-                        }))}
-                        required
-                        step="0.0001"
-                        type="number"
-                        value={settledAmounts[category]}
-                      />
-                      <b>$</b>
-                    </span>
-                  </label>
                 </div>
               ))}
             </div>
             <p className="sub-account-rate-hint">
-              {t('应付 =（总消耗 - 已结算）× 汇率。')}
+              {t('100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。')}
             </p>
             <section className="sub-account-settlement-history">
               <h3>{t('结算记录')}</h3>
@@ -4398,25 +4648,24 @@ function SubAccountRateDialog({
                       <tr>
                         <th>{t('结算时间')}</th>
                         <th>{t('渠道分类')}</th>
-                        <th>{t('变更前')}</th>
-                        <th>{t('变更后')}</th>
-                        <th>{t('变更金额')}</th>
-                        <th>{t('保存时汇率')}</th>
+                        <th>{t('消耗额度')}</th>
+                        <th>{t('结算汇率')}</th>
+                        <th>{t('结算金额')}</th>
+                        <th>{t('结算后累计')}</th>
                       </tr>
                     </thead>
                     <tbody>
                       {settlementRecords.map((record) => {
-                        const change = Number(record.changeAmount);
                         return (
                           <tr key={record.id}>
                             <td>{formatBeijingDateTime(record.createdAt, language)}</td>
                             <td>{categoryLabel(record.category, language)}</td>
-                            <td>${record.previousAmount}</td>
-                            <td>${record.settledAmount}</td>
-                            <td className={change > 0 ? 'positive' : change < 0 ? 'negative' : ''}>
-                              {formatSignedDollar(record.changeAmount)}
-                            </td>
+                            <td>${record.consumptionAmount}</td>
                             <td>{record.ratePercent}%</td>
+                            <td className={Number(record.settlementAmount) < 0 ? 'negative' : 'positive'}>
+                              ${record.settlementAmount}
+                            </td>
+                            <td>${record.settledAmount}</td>
                           </tr>
                         );
                       })}
@@ -4786,6 +5035,7 @@ function SubAccountsView() {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [usageAccount, setUsageAccount] = useState<SubAccount | null>(null);
+  const [settlementAccount, setSettlementAccount] = useState<SubAccount | null>(null);
   const [rateAccount, setRateAccount] = useState<SubAccount | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<SubAccount | null>(null);
@@ -4892,6 +5142,9 @@ function SubAccountsView() {
                         <button aria-label={t('查看 {{name}} 的消耗', { name: item.username })} onClick={() => setUsageAccount(item)} type="button">
                           <BarChart3 size={14} />{t('查看消耗')}
                         </button>
+                        <button aria-label={t('为 {{name}} 结算', { name: item.username })} onClick={() => setSettlementAccount(item)} type="button">
+                          <CheckCircle2 size={14} />{t('结算')}
+                        </button>
                         <button aria-label={t('为 {{name}} 设置汇率', { name: item.username })} onClick={() => setRateAccount(item)} type="button">
                           <CircleDollarSign size={14} />{t('设置汇率')}
                         </button>
@@ -4913,6 +5166,13 @@ function SubAccountsView() {
         )}
       </div>
       {usageAccount && <SubAccountUsageDialog key={usageAccount.id} account={usageAccount} onClose={() => setUsageAccount(null)} />}
+      {settlementAccount && (
+        <SubAccountSettlementDialog
+          key={settlementAccount.id}
+          account={settlementAccount}
+          onClose={() => setSettlementAccount(null)}
+        />
+      )}
       {rateAccount && (
         <SubAccountRateDialog
           key={rateAccount.id}

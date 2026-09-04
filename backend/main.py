@@ -69,6 +69,11 @@ WRITE_PATHS = {
 }
 
 
+def decimal_text(value: Decimal) -> str:
+    formatted = format(value, "f")
+    return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
+
+
 class BackendError(Exception):
     def __init__(self, status: int, message: str, request_id: str | None = None):
         super().__init__(message)
@@ -139,6 +144,7 @@ class SessionStore:
                     settled_amount TEXT NOT NULL,
                     change_amount TEXT NOT NULL,
                     rate_percent TEXT NOT NULL,
+                    settlement_amount TEXT NOT NULL DEFAULT '0',
                     created_at INTEGER NOT NULL
                 );
                 CREATE INDEX IF NOT EXISTS idx_category_settlement_records_account_time
@@ -188,6 +194,49 @@ class SessionStore:
                     ADD COLUMN settled_amount TEXT NOT NULL DEFAULT '0'
                     """
                 )
+            settlement_columns = {
+                str(row["name"])
+                for row in self.connection.execute(
+                    "PRAGMA table_info(category_settlement_records)"
+                ).fetchall()
+            }
+            if "settlement_amount" not in settlement_columns:
+                self.connection.execute(
+                    """
+                    ALTER TABLE category_settlement_records
+                    ADD COLUMN settlement_amount TEXT NOT NULL DEFAULT '0'
+                    """
+                )
+                legacy_records = self.connection.execute(
+                    """
+                    SELECT id, change_amount, rate_percent
+                    FROM category_settlement_records
+                    """
+                ).fetchall()
+                settlement_updates = []
+                for record in legacy_records:
+                    try:
+                        consumption = Decimal(str(record["change_amount"]))
+                        rate = Decimal(str(record["rate_percent"]))
+                    except (InvalidOperation, TypeError, ValueError):
+                        continue
+                    if not consumption.is_finite() or not rate.is_finite():
+                        continue
+                    settlement_updates.append(
+                        (
+                            decimal_text(consumption * rate / Decimal(100)),
+                            int(record["id"]),
+                        )
+                    )
+                if settlement_updates:
+                    self.connection.executemany(
+                        """
+                        UPDATE category_settlement_records
+                        SET settlement_amount = ?
+                        WHERE id = ?
+                        """,
+                        settlement_updates,
+                    )
             alias_columns = {
                 str(row["name"])
                 for row in self.connection.execute("PRAGMA table_info(account_aliases)").fetchall()
@@ -627,86 +676,129 @@ class SessionStore:
         self,
         sub_account_user_id: int,
         rates: dict[str, Decimal],
-        settled_amounts: dict[str, Decimal],
     ) -> None:
         now = int(time.time() * 1000)
+        values = []
+        for category in CHANNEL_USAGE_CATEGORIES:
+            values.append(
+                (
+                    sub_account_user_id,
+                    category,
+                    decimal_text(rates[category]),
+                    now,
+                )
+            )
         with self.lock:
-            previous_rows = self.connection.execute(
-                """
-                SELECT category, settled_amount
-                FROM category_exchange_rates
-                WHERE sub_account_user_id = ?
-                """,
-                (sub_account_user_id,),
-            ).fetchall()
-            previous_amounts = {category: Decimal(0) for category in CHANNEL_USAGE_CATEGORIES}
-            for row in previous_rows:
-                category = str(row["category"])
-                if category not in previous_amounts:
-                    continue
-                try:
-                    previous = Decimal(str(row["settled_amount"]))
-                except (InvalidOperation, TypeError, ValueError):
-                    continue
-                if previous.is_finite():
-                    previous_amounts[category] = previous
-
-            values = []
-            records = []
-            for category in CHANNEL_USAGE_CATEGORIES:
-                rate = format(rates[category], "f")
-                if "." in rate:
-                    rate = rate.rstrip("0").rstrip(".")
-                settled = format(settled_amounts[category], "f")
-                if "." in settled:
-                    settled = settled.rstrip("0").rstrip(".")
-                values.append((sub_account_user_id, category, rate, settled, now))
-                previous = previous_amounts[category]
-                if settled_amounts[category] != previous:
-                    previous_text = format(previous, "f")
-                    if "." in previous_text:
-                        previous_text = previous_text.rstrip("0").rstrip(".")
-                    change = format(settled_amounts[category] - previous, "f")
-                    if "." in change:
-                        change = change.rstrip("0").rstrip(".")
-                    records.append(
-                        (
-                            sub_account_user_id,
-                            category,
-                            previous_text,
-                            settled,
-                            change,
-                            rate,
-                            now,
-                        )
-                    )
             try:
                 self.connection.executemany(
                     """
                     INSERT INTO category_exchange_rates
                         (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
-                    VALUES (?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, '0', ?)
                     ON CONFLICT(sub_account_user_id, category) DO UPDATE SET
                         rate_percent = excluded.rate_percent,
-                        settled_amount = excluded.settled_amount,
                         updated_at = excluded.updated_at
                     """,
                     values,
                 )
-                if records:
-                    self.connection.executemany(
-                        """
-                        INSERT INTO category_settlement_records
-                            (sub_account_user_id, category, previous_amount, settled_amount,
-                             change_amount, rate_percent, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        records,
-                    )
                 self.connection.commit()
             except Exception:
                 self.connection.rollback()
                 raise
+
+    def record_settlement(
+        self,
+        sub_account_user_id: int,
+        category: str,
+        consumption_amount: Decimal,
+        total_usage_amount: Decimal,
+    ) -> dict[str, Any]:
+        now = int(time.time() * 1000)
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT rate_percent, settled_amount
+                FROM category_exchange_rates
+                WHERE sub_account_user_id = ? AND category = ?
+                """,
+                (sub_account_user_id, category),
+            ).fetchone()
+            rate = Decimal("100")
+            previous = Decimal(0)
+            if row is not None:
+                try:
+                    stored_rate = Decimal(str(row["rate_percent"]))
+                    if stored_rate.is_finite() and Decimal(0) <= stored_rate <= Decimal("100000"):
+                        rate = stored_rate
+                except (InvalidOperation, TypeError, ValueError):
+                    pass
+                try:
+                    stored_settled = Decimal(str(row["settled_amount"]))
+                    if stored_settled.is_finite() and stored_settled >= 0:
+                        previous = stored_settled
+                except (InvalidOperation, TypeError, ValueError):
+                    pass
+            available = max(Decimal(0), total_usage_amount - previous)
+            if consumption_amount <= 0:
+                raise BackendError(400, "本次结算消耗额度必须大于 0")
+            if consumption_amount > available:
+                raise BackendError(
+                    409,
+                    f"本次结算消耗额度不能超过可结算额度 ${dollar_amount(available)}",
+                )
+            settled = previous + consumption_amount
+            settlement_amount = consumption_amount * rate / Decimal(100)
+            try:
+                self.connection.execute(
+                    """
+                    INSERT INTO category_exchange_rates
+                        (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(sub_account_user_id, category) DO UPDATE SET
+                        settled_amount = excluded.settled_amount,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        sub_account_user_id,
+                        category,
+                        decimal_text(rate),
+                        decimal_text(settled),
+                        now,
+                    ),
+                )
+                cursor = self.connection.execute(
+                    """
+                    INSERT INTO category_settlement_records
+                        (sub_account_user_id, category, previous_amount, settled_amount,
+                         change_amount, rate_percent, settlement_amount, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sub_account_user_id,
+                        category,
+                        decimal_text(previous),
+                        decimal_text(settled),
+                        decimal_text(consumption_amount),
+                        decimal_text(rate),
+                        decimal_text(settlement_amount),
+                        now,
+                    ),
+                )
+                record_id = int(cursor.lastrowid)
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+        return {
+            "id": record_id,
+            "category": category,
+            "previous_amount": decimal_text(previous),
+            "settled_amount": decimal_text(settled),
+            "change_amount": decimal_text(consumption_amount),
+            "rate_percent": decimal_text(rate),
+            "settlement_amount": decimal_text(settlement_amount),
+            "created_at": now,
+        }
 
     def settlement_records(
         self,
@@ -718,7 +810,7 @@ class SessionStore:
             rows = self.connection.execute(
                 """
                 SELECT id, category, previous_amount, settled_amount, change_amount,
-                       rate_percent, created_at
+                       rate_percent, settlement_amount, created_at
                 FROM category_settlement_records
                 WHERE sub_account_user_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -914,11 +1006,6 @@ def dollar_amount(value: Decimal) -> str:
     return f"{value:.4f}"
 
 
-def decimal_text(value: Decimal) -> str:
-    formatted = format(value, "f")
-    return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
-
-
 def category_rates_payload(
     sub_account_user_id: int,
 ) -> dict[str, Any]:
@@ -935,18 +1022,22 @@ def category_rates_payload(
             }
             for category in CHANNEL_USAGE_CATEGORIES
         ],
-        "settlementRecords": [
-            {
-                "id": int(record["id"]),
-                "category": str(record["category"]),
-                "previousAmount": dollar_amount(Decimal(str(record["previous_amount"]))),
-                "settledAmount": dollar_amount(Decimal(str(record["settled_amount"]))),
-                "changeAmount": dollar_amount(Decimal(str(record["change_amount"]))),
-                "ratePercent": decimal_text(Decimal(str(record["rate_percent"]))),
-                "createdAt": int(record["created_at"]),
-            }
-            for record in settlement_records
-        ],
+        "settlementRecords": [settlement_record_payload(record) for record in settlement_records],
+    }
+
+
+def settlement_record_payload(record: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+    consumption_amount = Decimal(str(record["change_amount"]))
+    return {
+        "id": int(record["id"]),
+        "category": str(record["category"]),
+        "previousAmount": dollar_amount(Decimal(str(record["previous_amount"]))),
+        "settledAmount": dollar_amount(Decimal(str(record["settled_amount"]))),
+        "changeAmount": dollar_amount(consumption_amount),
+        "consumptionAmount": dollar_amount(consumption_amount),
+        "ratePercent": decimal_text(Decimal(str(record["rate_percent"]))),
+        "settlementAmount": dollar_amount(Decimal(str(record["settlement_amount"]))),
+        "createdAt": int(record["created_at"]),
     }
 
 
@@ -1691,16 +1782,9 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
 
             body = await read_body(request)
             raw_rates = body.get("rates")
-            raw_settled_amounts = body.get("settledAmounts")
             if not isinstance(raw_rates, dict) or set(raw_rates) != set(CHANNEL_USAGE_CATEGORIES):
                 raise BackendError(400, "请完整填写全部渠道分类汇率")
-            if (
-                not isinstance(raw_settled_amounts, dict)
-                or set(raw_settled_amounts) != set(CHANNEL_USAGE_CATEGORIES)
-            ):
-                raise BackendError(400, "请完整填写全部渠道分类已结算金额")
             parsed_rates: dict[str, Decimal] = {}
-            parsed_settled_amounts: dict[str, Decimal] = {}
             for category in CHANNEL_USAGE_CATEGORIES:
                 raw_value = raw_rates.get(category)
                 if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float, str)):
@@ -1712,25 +1796,85 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 if not value.is_finite() or value < 0 or value > Decimal("100000"):
                     raise BackendError(400, f"{category} 汇率须在 0% 至 100000% 之间")
                 parsed_rates[category] = value
-                raw_settled = raw_settled_amounts.get(category)
-                if isinstance(raw_settled, bool) or not isinstance(raw_settled, (int, float, str)):
-                    raise BackendError(400, f"{category} 已结算金额格式不正确")
-                try:
-                    settled = Decimal(str(raw_settled).strip())
-                except (InvalidOperation, ValueError) as error:
-                    raise BackendError(400, f"{category} 已结算金额格式不正确") from error
-                if (
-                    not settled.is_finite()
-                    or settled < 0
-                    or settled > Decimal("1000000000000")
-                ):
-                    raise BackendError(400, f"{category} 已结算金额无效")
-                parsed_settled_amounts[category] = settled
-            store.save_category_rates(target_id, parsed_rates, parsed_settled_amounts)
+            store.save_category_rates(target_id, parsed_rates)
             return success_response(
                 request,
                 request_id,
                 category_rates_payload(target_id),
+                cookie,
+            )
+
+        settlement_match = re.fullmatch(r"/api/sub-accounts/(\d+)/settlements", path)
+        if settlement_match and request.method == "POST":
+            if session["role"] not in {"supplier", "admin"}:
+                raise BackendError(403, "当前账号无权结算子账号消耗")
+            target_id = int(settlement_match.group(1))
+            if target_id <= 0:
+                raise BackendError(400, "子账号 ID 无效")
+            body = await read_body(request)
+            category = body.get("category")
+            category = category.strip().lower() if isinstance(category, str) else ""
+            if category not in CHANNEL_USAGE_CATEGORIES:
+                raise BackendError(400, "渠道分类无效")
+            raw_consumption_amount = body.get("consumptionAmount")
+            if (
+                isinstance(raw_consumption_amount, bool)
+                or not isinstance(raw_consumption_amount, (int, float, str))
+            ):
+                raise BackendError(400, "本次结算消耗额度格式不正确")
+            try:
+                consumption_amount = Decimal(str(raw_consumption_amount).strip())
+            except (InvalidOperation, ValueError) as error:
+                raise BackendError(400, "本次结算消耗额度格式不正确") from error
+            if (
+                not consumption_amount.is_finite()
+                or consumption_amount <= 0
+                or consumption_amount > Decimal("1000000000000")
+            ):
+                raise BackendError(400, "本次结算消耗额度必须大于 0")
+            if consumption_amount.normalize().as_tuple().exponent < -4:
+                raise BackendError(400, "本次结算消耗额度最多保留 4 位小数")
+
+            usage = await sub_account_tag_usage(session, target_id, category)
+            category_usage = next(
+                (
+                    item
+                    for item in usage.get("categories", [])
+                    if isinstance(item, dict) and item.get("category") == category
+                ),
+                None,
+            )
+            if category_usage is None:
+                raise BackendError(502, "渠道分类消耗数据不完整，请刷新后重试")
+            try:
+                total_usage_amount = Decimal(str(category_usage.get("amount", "0")))
+            except (InvalidOperation, ValueError) as error:
+                raise BackendError(502, "渠道分类消耗数据格式不正确") from error
+            record = store.record_settlement(
+                target_id,
+                category,
+                consumption_amount,
+                total_usage_amount,
+            )
+            settled_amount = Decimal(str(record["settled_amount"]))
+            rate_percent = Decimal(str(record["rate_percent"]))
+            outstanding_amount = max(Decimal(0), total_usage_amount - settled_amount)
+            return success_response(
+                request,
+                request_id,
+                {
+                    "settlement": settlement_record_payload(record),
+                    "category": {
+                        "category": category,
+                        "totalAmount": dollar_amount(total_usage_amount),
+                        "settledAmount": dollar_amount(settled_amount),
+                        "outstandingAmount": dollar_amount(outstanding_amount),
+                        "ratePercent": decimal_text(rate_percent),
+                        "payableAmount": dollar_amount(
+                            outstanding_amount * rate_percent / Decimal(100)
+                        ),
+                    },
+                },
                 cookie,
             )
 

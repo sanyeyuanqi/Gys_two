@@ -920,7 +920,7 @@ textarea:focus {
 
 .account-dialog .sub-account-rate-row {
   display: grid;
-  grid-template-columns: minmax(160px, 1fr) 130px 170px;
+  grid-template-columns: minmax(160px, 1fr) 170px;
   align-items: center;
   gap: 14px;
   border: 1px solid #e4e7ec;
@@ -1003,6 +1003,101 @@ textarea:focus {
   justify-content: center;
   gap: 9px;
   color: var(--muted);
+}
+
+.sub-account-rate-loading.error {
+  color: var(--red);
+}
+
+.sub-account-settlement-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.account-dialog.sub-account-settlement-dialog form {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 20px;
+}
+
+.account-dialog .sub-account-settlement-category {
+  max-width: 320px;
+}
+
+.account-dialog .sub-account-settlement-category select {
+  height: 38px;
+}
+
+.sub-account-settlement-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.sub-account-settlement-summary > span {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  border: 1px solid #d8dee9;
+  border-radius: 7px;
+  background: #fafbfc;
+  padding: 11px 12px;
+}
+
+.sub-account-settlement-summary small,
+.sub-account-settlement-result small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.sub-account-settlement-summary strong,
+.sub-account-settlement-result strong {
+  overflow: hidden;
+  color: #172033;
+  text-overflow: ellipsis;
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-account-settlement-calculation {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  align-items: end;
+  gap: 12px;
+}
+
+.sub-account-settlement-result {
+  min-height: 63px;
+  display: grid;
+  align-content: center;
+  gap: 5px;
+  border: 1px solid #a6e9c6;
+  border-radius: 7px;
+  background: #ecfdf3;
+  padding: 8px 13px;
+}
+
+.sub-account-settlement-result strong {
+  color: #027a48;
+  font-size: 21px;
+}
+
+.sub-account-settlement-notice {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  border: 1px solid #a6e9c6;
+  border-radius: 6px;
+  background: #ecfdf3;
+  color: #027a48;
+  padding: 9px 11px;
+  font-size: 13px;
+  font-weight: 600;
 }
 
 .sub-account-settlement-history {
@@ -1961,8 +2056,8 @@ textarea:focus {
 .sub-accounts-table td:last-child {
   position: sticky;
   right: 0;
-  width: 340px;
-  min-width: 340px;
+  width: 410px;
+  min-width: 410px;
   background: #fff;
   box-shadow: -1px 0 0 var(--line);
 }
@@ -2254,6 +2349,14 @@ textarea:focus {
 
   .sub-account-rate-name {
     grid-column: 1 / -1;
+  }
+
+  .sub-account-settlement-summary {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .sub-account-settlement-calculation {
+    grid-template-columns: 1fr;
   }
 
   .sub-account-usage-header,
