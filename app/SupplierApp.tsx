@@ -170,6 +170,11 @@ type ChannelListData = {
 type ChannelSummary = {
   count: number;
   total_quota: number;
+  categories?: Array<{
+    category: string;
+    quota?: number;
+    alive_rows?: number;
+  }>;
 };
 
 type ChannelGroupSummary = {
@@ -3253,6 +3258,7 @@ function MyChannelsView() {
   const [groups, setGroups] = useState<ChannelGroupSummary[]>([]);
   const [summary, setSummary] = useState<ChannelSummary>({ count: 0, total_quota: 0 });
   const [tags, setTags] = useState<string[]>([]);
+  const [category, setCategory] = useState('');
   const [status, setStatus] = useState('');
   const [tag, setTag] = useState('');
   const [keyword, setKeyword] = useState('');
@@ -3290,10 +3296,29 @@ function MyChannelsView() {
   const [testError, setTestError] = useState('');
   const [testToast, setTestToast] = useState<{ id: number; text: string } | null>(null);
 
+  const categoryOptions = useMemo(() => {
+    const available = (summary.categories || [])
+      .map((item) => item.category?.trim())
+      .filter((item): item is string => !!item);
+    return Array.from(new Set(available.length ? available : Object.keys(categoryLabels)));
+  }, [summary.categories]);
+
   const applyDateRange = useCallback((params: URLSearchParams) => {
     if (dateRange.from) params.set('created_from', dateRange.from);
     if (dateRange.to) params.set('created_to', dateRange.to);
   }, [dateRange.from, dateRange.to]);
+
+  const applyCommonFilters = useCallback((params: URLSearchParams) => {
+    if (category) params.set('category', category);
+    applyDateRange(params);
+  }, [applyDateRange, category]);
+
+  const applyListFilters = useCallback((params: URLSearchParams) => {
+    applyCommonFilters(params);
+    if (status) params.set('status', status);
+    if (tag) params.set('tag', tag);
+    if (keyword.trim()) params.set('keyword', keyword.trim());
+  }, [applyCommonFilters, keyword, status, tag]);
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
@@ -3305,9 +3330,12 @@ function MyChannelsView() {
           page: String(groupPage),
           page_size: String(pageSize),
         });
-        applyDateRange(groupParams);
+        applyCommonFilters(groupParams);
+        const summaryParams = new URLSearchParams();
+        applyCommonFilters(summaryParams);
+        const summaryQuery = summaryParams.toString();
         const [summaryData, tagData, groupData] = await Promise.all([
-          api<ChannelSummary>('/api/channels/summary', { fresh }),
+          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh }),
           api<string[]>('/api/channels/tags', { fresh }),
           api<{ items?: ChannelGroupSummary[]; total?: number; total_groups?: number }>(
             `/api/channels/tag-summary?${groupParams.toString()}`,
@@ -3320,12 +3348,12 @@ function MyChannelsView() {
         setGroupTotal(groupData.total ?? groupData.total_groups ?? groupData.items?.length ?? 0);
       } else {
         const params = new URLSearchParams({ page: String(listPage), page_size: String(pageSize) });
-        if (status) params.set('status', status);
-        if (tag) params.set('tag', tag);
-        if (keyword.trim()) params.set('keyword', keyword.trim());
-        applyDateRange(params);
+        applyListFilters(params);
+        const summaryParams = new URLSearchParams();
+        applyListFilters(summaryParams);
+        const summaryQuery = summaryParams.toString();
         const [summaryData, tagData, listData] = await Promise.all([
-          api<ChannelSummary>('/api/channels/summary', { fresh }),
+          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh }),
           api<string[]>('/api/channels/tags', { fresh }),
           api<ChannelListData>(`/api/channels?${params.toString()}`, { fresh }),
         ]);
@@ -3342,7 +3370,7 @@ function MyChannelsView() {
     } finally {
       setLoading(false);
     }
-  }, [applyDateRange, groupPage, keyword, listPage, pageSize, status, t, tag, viewMode]);
+  }, [applyCommonFilters, applyListFilters, groupPage, listPage, pageSize, t, viewMode]);
 
   useEffect(() => {
     load();
@@ -3391,7 +3419,7 @@ function MyChannelsView() {
   }
 
   async function toggleGroup(group: ChannelGroupSummary) {
-    const key = group.tag || '__untagged__';
+    const key = `${category || ALL_CHANNEL_FILTER_VALUE}:${group.tag || '__untagged__'}`;
     const expanded = expandedTags.includes(key);
     setExpandedTags((current) => (expanded ? current.filter((item) => item !== key) : [...current, key]));
     if (expanded || groupDetails[key] || detailLoading[key]) return;
@@ -3401,7 +3429,7 @@ function MyChannelsView() {
       const params = new URLSearchParams({ page: '1', page_size: '500' });
       if (group.tag) params.set('tag', group.tag);
       else params.set('untagged', 'true');
-      applyDateRange(params);
+      applyCommonFilters(params);
       const result = await api<ChannelListData>(`/api/channels?${params.toString()}`, { fresh: true });
       setGroupDetails((current) => ({ ...current, [key]: result.items || [] }));
     } catch (error) {
@@ -3702,6 +3730,27 @@ function MyChannelsView() {
           startPlaceholder={t('创建起')}
           value={{ start: dateRange.from, end: dateRange.to }}
         />
+        <Select
+          value={category || ALL_CHANNEL_FILTER_VALUE}
+          onValueChange={(value) => {
+            setCategory(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
+            setGroupPage(1);
+            setListPage(1);
+            setExpandedTags([]);
+            setGroupDetails({});
+            setDetailLoading({});
+          }}
+        >
+          <SelectTrigger aria-label={t('分类')} className="my-channel-filter-select">
+            <SelectValue>{category ? categoryLabel(category, language) : t('全部分类')}</SelectValue>
+          </SelectTrigger>
+          <SelectContent align="start" alignItemWithTrigger={false} className="my-channel-filter-select-content">
+            <SelectItem value={ALL_CHANNEL_FILTER_VALUE}>{t('全部分类')}</SelectItem>
+            {categoryOptions.map((item) => (
+              <SelectItem key={item} value={item}>{categoryLabel(item, language)}</SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
         {viewMode === 'list' && (
           <>
             <Select
@@ -3788,7 +3837,7 @@ function MyChannelsView() {
               </thead>
               <tbody>
                 {groups.map((group, index) => {
-                  const key = group.tag || '__untagged__';
+                  const key = `${category || ALL_CHANNEL_FILTER_VALUE}:${group.tag || '__untagged__'}`;
                   const expanded = expandedTags.includes(key);
                   const enabled = Number(group.enabled || 0);
                   const total = Number(group.count || group.key_count || 0);
