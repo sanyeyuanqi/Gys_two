@@ -2163,9 +2163,22 @@ textarea:focus {
 .sub-account-usage-footer {
   display: flex;
   flex: 0 0 auto;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
   border-top: 1px solid var(--line);
   padding: 12px 24px;
+}
+
+.sub-account-total-payable {
+  color: #344054;
+  font-size: 15px;
+}
+
+.sub-account-total-payable span {
+  color: #039855;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
 }
 
 @media (max-width: 720px) {

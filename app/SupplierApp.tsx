@@ -319,6 +319,7 @@ const englishTranslations: Record<string, string> = {
   '总消耗': 'Total Usage',
   '已结算': 'Settled',
   '应付': 'Payable',
+  '总应付': 'Total Payable',
   '已结算金额': 'Settled Amount',
   '渠道分类': 'Channel Category',
   '涉及分类': 'Categories',
@@ -4175,6 +4176,11 @@ function SubAccountUsageDialog({
           )}
         </div>
         <footer className="sub-account-usage-footer">
+          {summary && (
+            <strong className="sub-account-total-payable">
+              {t('总应付')}：<span>${summary.totalPayableAmount || '0.0000'}</span>
+            </strong>
+          )}
           <button className="ghost-button compact" onClick={onClose} type="button">{t('关闭')}</button>
         </footer>
       </section>
