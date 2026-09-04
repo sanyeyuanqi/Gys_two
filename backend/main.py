@@ -123,6 +123,15 @@ class SessionStore:
                     created_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS category_exchange_rates (
+                    owner_user_id INTEGER NOT NULL,
+                    sub_account_user_id INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    rate_percent TEXT NOT NULL DEFAULT '100',
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (owner_user_id, sub_account_user_id, category)
+                );
+                DROP INDEX IF EXISTS idx_category_exchange_rates_account;
                 """
             )
             alias_columns = {
@@ -166,6 +175,7 @@ class SessionStore:
                     """,
                     (public_username, display_name, upstream_username),
                 )
+            self.connection.execute("PRAGMA optimize")
             self.connection.commit()
 
     @staticmethod
@@ -513,6 +523,67 @@ class SessionStore:
             )
             self.connection.commit()
 
+    def category_rates(self, owner_user_id: int, sub_account_user_id: int) -> dict[str, Decimal]:
+        with self.lock:
+            rows = self.connection.execute(
+                """
+                SELECT category, rate_percent
+                FROM category_exchange_rates
+                WHERE owner_user_id = ? AND sub_account_user_id = ?
+                """,
+                (owner_user_id, sub_account_user_id),
+            ).fetchall()
+        rates = {category: Decimal("100") for category in CHANNEL_USAGE_CATEGORIES}
+        for row in rows:
+            category = str(row["category"])
+            if category not in rates:
+                continue
+            try:
+                value = Decimal(str(row["rate_percent"]))
+            except (InvalidOperation, TypeError, ValueError):
+                continue
+            if value.is_finite() and Decimal(0) <= value <= Decimal("100000"):
+                rates[category] = value
+        return rates
+
+    def save_category_rates(
+        self,
+        owner_user_id: int,
+        sub_account_user_id: int,
+        rates: dict[str, Decimal],
+    ) -> None:
+        now = int(time.time() * 1000)
+        values = []
+        for category in CHANNEL_USAGE_CATEGORIES:
+            formatted = format(rates[category], "f")
+            if "." in formatted:
+                formatted = formatted.rstrip("0").rstrip(".")
+            values.append((owner_user_id, sub_account_user_id, category, formatted, now))
+        with self.lock:
+            self.connection.executemany(
+                """
+                INSERT INTO category_exchange_rates
+                    (owner_user_id, sub_account_user_id, category, rate_percent, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(owner_user_id, sub_account_user_id, category) DO UPDATE SET
+                    rate_percent = excluded.rate_percent,
+                    updated_at = excluded.updated_at
+                """,
+                values,
+            )
+            self.connection.commit()
+
+    def delete_category_rates(self, owner_user_id: int, sub_account_user_id: int) -> None:
+        with self.lock:
+            self.connection.execute(
+                """
+                DELETE FROM category_exchange_rates
+                WHERE owner_user_id = ? AND sub_account_user_id = ?
+                """,
+                (owner_user_id, sub_account_user_id),
+            )
+            self.connection.commit()
+
     def touch(self, session: sqlite3.Row) -> int:
         now = int(time.time() * 1000)
         expires_at = min(int(session["created_at"]) + 30 * DAY_MS, now + 7 * DAY_MS)
@@ -673,6 +744,25 @@ def quota_dollars(value: Decimal) -> str:
     return f"{value / Decimal(500_000):.4f}"
 
 
+def decimal_text(value: Decimal) -> str:
+    formatted = format(value, "f")
+    return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
+
+
+def category_rates_payload(
+    owner_user_id: int,
+    sub_account_user_id: int,
+) -> dict[str, Any]:
+    rates = store.category_rates(owner_user_id, sub_account_user_id)
+    return {
+        "userId": sub_account_user_id,
+        "rates": [
+            {"category": category, "ratePercent": decimal_text(rates[category])}
+            for category in CHANNEL_USAGE_CATEGORIES
+        ],
+    }
+
+
 async def channel_model_usage(session: sqlite3.Row, channel_id: int) -> dict[str, Any]:
     page = 1
     loaded = 0
@@ -734,6 +824,11 @@ async def sub_account_tag_usage(
     if category_filter and category_filter not in CHANNEL_USAGE_CATEGORIES:
         raise BackendError(400, "渠道分类无效")
     category_filters = (category_filter,) if category_filter else CHANNEL_USAGE_CATEGORIES
+    try:
+        owner_user_id = int(session["upstream_user_id"])
+    except (TypeError, ValueError) as error:
+        raise BackendError(401, "用户身份无效，请重新登录") from error
+    category_rates = store.category_rates(owner_user_id, target_id)
 
     children = await authorized_json(session, "/api/sub-accounts")
     child_items = children if isinstance(children, list) else children.get("items", []) if isinstance(children, dict) else []
@@ -863,7 +958,8 @@ async def sub_account_tag_usage(
     for channel, usage in usage_results:
         logged_quota = usage["quota"]
         channel_quota = channel["quota"]
-        effective_quota = max(channel_quota, logged_quota)
+        rate_factor = category_rates[channel["category"]] / Decimal(100)
+        effective_quota = max(channel_quota, logged_quota) * rate_factor
         total_quota += effective_quota
         total_requests += usage["requestCount"]
         category = categories.setdefault(
@@ -882,9 +978,14 @@ async def sub_account_tag_usage(
         category["tags"].add(channel["tag"])
         category["requestCount"] += usage["requestCount"]
         for model, model_usage in usage["models"].items():
-            add_usage(channel, model, model_usage["quota"], model_usage["requestCount"])
+            add_usage(
+                channel,
+                model,
+                model_usage["quota"] * rate_factor,
+                model_usage["requestCount"],
+            )
             category["models"].add(model)
-        unattributed = max(Decimal(0), channel_quota - logged_quota)
+        unattributed = max(Decimal(0), channel_quota - logged_quota) * rate_factor
         if unattributed:
             add_usage(channel, "", unattributed, 0)
             category["models"].add("")
@@ -913,6 +1014,7 @@ async def sub_account_tag_usage(
                 "tagCount": len(category["tags"]),
                 "modelCount": len(category["models"]),
                 "requestCount": category["requestCount"],
+                "ratePercent": decimal_text(category_rates[category["category"]]),
                 "amount": quota_dollars(category["quota"]),
             }
             for category in category_rows
@@ -1333,6 +1435,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(400, "子账号 ID 无效")
             if request.method == "DELETE":
                 data = await authorized_json(session, path, method="DELETE")
+                store.delete_category_rates(int(session["upstream_user_id"]), target_id)
                 store.delete_sub_account_alias(target_id)
                 return success_response(request, request_id, sanitize_data(data), cookie)
 
@@ -1366,6 +1469,49 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             data = await authorized_json(session, path, method="PUT", body=update_body)
             store.rename_sub_account_alias(target_id, username, display_name)
             return success_response(request, request_id, sanitize_data(data), cookie)
+
+        rates_match = re.fullmatch(r"/api/sub-accounts/(\d+)/category-rates", path)
+        if rates_match and request.method in {"GET", "PUT"}:
+            if session["role"] not in {"supplier", "admin"}:
+                raise BackendError(403, "当前账号无权设置子账号汇率")
+            target_id = int(rates_match.group(1))
+            if target_id <= 0:
+                raise BackendError(400, "子账号 ID 无效")
+            try:
+                owner_user_id = int(session["upstream_user_id"])
+            except (TypeError, ValueError) as error:
+                raise BackendError(401, "用户身份无效，请重新登录") from error
+            if request.method == "GET":
+                return success_response(
+                    request,
+                    request_id,
+                    category_rates_payload(owner_user_id, target_id),
+                    cookie,
+                )
+
+            body = await read_body(request)
+            raw_rates = body.get("rates")
+            if not isinstance(raw_rates, dict) or set(raw_rates) != set(CHANNEL_USAGE_CATEGORIES):
+                raise BackendError(400, "请完整填写全部渠道分类汇率")
+            parsed_rates: dict[str, Decimal] = {}
+            for category in CHANNEL_USAGE_CATEGORIES:
+                raw_value = raw_rates.get(category)
+                if isinstance(raw_value, bool) or not isinstance(raw_value, (int, float, str)):
+                    raise BackendError(400, f"{category} 汇率格式不正确")
+                try:
+                    value = Decimal(str(raw_value).strip())
+                except (InvalidOperation, ValueError) as error:
+                    raise BackendError(400, f"{category} 汇率格式不正确") from error
+                if not value.is_finite() or value < 0 or value > Decimal("100000"):
+                    raise BackendError(400, f"{category} 汇率须在 0% 至 100000% 之间")
+                parsed_rates[category] = value
+            store.save_category_rates(owner_user_id, target_id, parsed_rates)
+            return success_response(
+                request,
+                request_id,
+                category_rates_payload(owner_user_id, target_id),
+                cookie,
+            )
 
         usage_match = re.fullmatch(r"/api/sub-accounts/(\d+)/tag-usage", path)
         if usage_match and request.method == "GET":

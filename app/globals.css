@@ -865,6 +865,127 @@ textarea:focus {
   width: min(100%, 480px);
 }
 
+.sub-account-rate-dialog {
+  width: min(760px, calc(100vw - 32px));
+  max-height: calc(100dvh - 40px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  padding: 0;
+}
+
+.sub-account-rate-header {
+  flex: 0 0 auto;
+  align-items: flex-start;
+  margin: 0;
+  border-bottom: 1px solid var(--line);
+  padding: 20px 22px 16px;
+}
+
+.sub-account-rate-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sub-account-rate-header h2 svg {
+  color: var(--blue);
+}
+
+.sub-account-rate-header p {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.account-dialog.sub-account-rate-dialog form {
+  min-height: 0;
+  overflow: auto;
+  padding: 18px 22px 20px;
+}
+
+.sub-account-rate-description,
+.sub-account-rate-hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.sub-account-rate-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+
+.account-dialog .sub-account-rate-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  border: 1px solid #e4e7ec;
+  border-radius: 7px;
+  background: #fafbfc;
+  padding: 10px 11px;
+}
+
+.sub-account-rate-name {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.sub-account-rate-name strong,
+.sub-account-rate-name small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sub-account-rate-name strong {
+  color: #344054;
+  font-size: 13px;
+}
+
+.sub-account-rate-name small {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.sub-account-rate-input {
+  width: 112px;
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.account-dialog .sub-account-rate-input input {
+  height: 34px;
+  padding-right: 30px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-account-rate-input b {
+  position: absolute;
+  top: 50%;
+  right: 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  transform: translateY(-50%);
+  pointer-events: none;
+}
+
+.sub-account-rate-loading {
+  min-height: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  color: var(--muted);
+}
+
 .account-dialog input:disabled {
   cursor: not-allowed;
   background: #f5f7fa;
@@ -1742,15 +1863,15 @@ textarea:focus {
 }
 
 .sub-accounts-table {
-  min-width: 1160px;
+  min-width: 1240px;
 }
 
 .sub-accounts-table th:last-child,
 .sub-accounts-table td:last-child {
   position: sticky;
   right: 0;
-  width: 250px;
-  min-width: 250px;
+  width: 340px;
+  min-width: 340px;
   background: #fff;
   box-shadow: -1px 0 0 var(--line);
 }
@@ -2010,6 +2131,10 @@ textarea:focus {
 }
 
 @media (max-width: 720px) {
+  .sub-account-rate-grid {
+    grid-template-columns: 1fr;
+  }
+
   .sub-account-usage-header,
   .sub-account-usage-body {
     padding-right: 16px;

@@ -229,6 +229,7 @@ type SubAccountUsageSummary = {
     tagCount: number;
     modelCount: number;
     requestCount: number;
+    ratePercent?: string;
     amount: string;
   }>;
   rows: Array<{
@@ -239,6 +240,14 @@ type SubAccountUsageSummary = {
     requestCount: number;
     amount: string;
     sharePercent: string;
+  }>;
+};
+
+type CategoryRateResponse = {
+  userId: number;
+  rates: Array<{
+    category: string;
+    ratePercent: string;
   }>;
 };
 
@@ -277,6 +286,17 @@ const englishTranslations: Record<string, string> = {
   '操作': 'Actions',
   '查看消耗': 'View Usage',
   '查看 {{name}} 的消耗': 'View usage for {{name}}',
+  '设置汇率': 'Set Rates',
+  '为 {{name}} 设置汇率': 'Set rates for {{name}}',
+  '渠道分类汇率': 'Channel Category Rates',
+  '为该用户分别设置每个渠道分类的金额汇率。': 'Set an amount rate for each channel category for this user.',
+  '汇率保存成功': 'Rates saved successfully',
+  '加载汇率失败': 'Failed to load rates',
+  '保存汇率失败': 'Failed to save rates',
+  '正在加载汇率': 'Loading rates',
+  '保存汇率': 'Save Rates',
+  '汇率须在 0% 至 100000% 之间': 'Rates must be between 0% and 100000%',
+  '100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。': '100% keeps the original usage amount. Category and model amounts in View Usage are multiplied by this rate.',
   '平台模型消耗': 'Platform & Model Usage',
   '消耗总量': 'Total Usage',
   '涉及平台': 'Platforms',
@@ -4143,6 +4163,146 @@ function SubAccountUsageDialog({
   );
 }
 
+function SubAccountRateDialog({
+  account,
+  onClose,
+  onSaved,
+}: {
+  account: SubAccount;
+  onClose: () => void;
+  onSaved: () => void;
+}) {
+  const { language, t } = useLanguage();
+  const [rates, setRates] = useState<Record<string, string>>(() => Object.fromEntries(
+    channelUsageCategories.map((category) => [category, '100']),
+  ));
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    api<CategoryRateResponse>(`/api/sub-accounts/${account.id}/category-rates`, {
+      fresh: true,
+      signal: controller.signal,
+    })
+      .then((value) => {
+        if (controller.signal.aborted) return;
+        setRates(Object.fromEntries(channelUsageCategories.map((category) => [
+          category,
+          value.rates.find((item) => item.category === category)?.ratePercent || '100',
+        ])));
+      })
+      .catch((failure) => {
+        if (!controller.signal.aborted) {
+          setError(failure instanceof Error ? failure.message : t('加载汇率失败'));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [account.id, t]);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const invalid = channelUsageCategories.some((category) => {
+      const value = Number(rates[category]);
+      return !Number.isFinite(value) || value < 0 || value > 100000;
+    });
+    if (invalid) {
+      setError(t('汇率须在 0% 至 100000% 之间'));
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await api(`/api/sub-accounts/${account.id}/category-rates`, {
+        method: 'PUT',
+        body: { rates },
+      });
+      onSaved();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('保存汇率失败'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="dialog-backdrop"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget && !saving) onClose();
+      }}
+      role="presentation"
+    >
+      <section
+        aria-labelledby="sub-account-rate-title"
+        aria-modal="true"
+        className="account-dialog sub-account-rate-dialog"
+        role="dialog"
+      >
+        <div className="account-dialog-header sub-account-rate-header">
+          <div>
+            <h2 id="sub-account-rate-title"><CircleDollarSign size={20} />{t('渠道分类汇率')}</h2>
+            <p>{account.display_name || account.username} · ID {account.id}</p>
+          </div>
+          <button aria-label={t('关闭')} disabled={saving} onClick={onClose} type="button"><X size={18} /></button>
+        </div>
+        {loading ? (
+          <div className="sub-account-rate-loading" role="status">
+            <Loader2 className="spin" size={22} />{t('正在加载汇率')}
+          </div>
+        ) : (
+          <form onSubmit={submit}>
+            <p className="sub-account-rate-description">{t('为该用户分别设置每个渠道分类的金额汇率。')}</p>
+            <div className="sub-account-rate-grid">
+              {channelUsageCategories.map((category) => (
+                <label className="sub-account-rate-row" key={category}>
+                  <span className="sub-account-rate-name">
+                    <strong>{categoryLabel(category, language)}</strong>
+                    <small>{category}</small>
+                  </span>
+                  <span className="sub-account-rate-input">
+                    <input
+                      inputMode="decimal"
+                      max="100000"
+                      min="0"
+                      onChange={(event) => setRates((current) => ({
+                        ...current,
+                        [category]: event.target.value,
+                      }))}
+                      required
+                      step="0.01"
+                      type="number"
+                      value={rates[category]}
+                    />
+                    <b>%</b>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <p className="sub-account-rate-hint">
+              {t('100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。')}
+            </p>
+            {error && <p className="account-dialog-error" role="alert">{error}</p>}
+            <div className="account-dialog-actions">
+              <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</button>
+              <button className="primary-button compact" disabled={saving} type="submit">
+                {saving && <Loader2 className="spin" size={16} />}
+                {t(saving ? '保存中...' : '保存汇率')}
+              </button>
+            </div>
+          </form>
+        )}
+      </section>
+    </div>
+  );
+}
+
 function isStrongSubAccountPassword(password: string) {
   return password.length >= 8
     && /[A-Za-z]/.test(password)
@@ -4487,6 +4647,7 @@ function SubAccountsView() {
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [usageAccount, setUsageAccount] = useState<SubAccount | null>(null);
+  const [rateAccount, setRateAccount] = useState<SubAccount | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<SubAccount | null>(null);
   const [deletingAccount, setDeletingAccount] = useState<SubAccount | null>(null);
@@ -4527,6 +4688,11 @@ function SubAccountsView() {
     setDeletingAccount(null);
     await load(true);
     setNotice({ type: 'ok', text: t('子账号删除成功') });
+  }
+
+  function handleRatesSaved() {
+    setRateAccount(null);
+    setNotice({ type: 'ok', text: t('汇率保存成功') });
   }
 
   return (
@@ -4587,6 +4753,9 @@ function SubAccountsView() {
                         <button aria-label={t('查看 {{name}} 的消耗', { name: item.username })} onClick={() => setUsageAccount(item)} type="button">
                           <BarChart3 size={14} />{t('查看消耗')}
                         </button>
+                        <button aria-label={t('为 {{name}} 设置汇率', { name: item.username })} onClick={() => setRateAccount(item)} type="button">
+                          <CircleDollarSign size={14} />{t('设置汇率')}
+                        </button>
                         <button aria-label={t('编辑 {{name}}', { name: item.username })} onClick={() => setEditingAccount(item)} type="button">
                           <Pencil size={14} />{t('编辑')}
                         </button>
@@ -4605,6 +4774,14 @@ function SubAccountsView() {
         )}
       </div>
       {usageAccount && <SubAccountUsageDialog key={usageAccount.id} account={usageAccount} onClose={() => setUsageAccount(null)} />}
+      {rateAccount && (
+        <SubAccountRateDialog
+          key={rateAccount.id}
+          account={rateAccount}
+          onClose={() => setRateAccount(null)}
+          onSaved={handleRatesSaved}
+        />
+      )}
       {createOpen && <CreateSubAccountDialog onClose={() => setCreateOpen(false)} onCreated={handleCreated} />}
       {editingAccount && <EditSubAccountDialog key={editingAccount.id} account={editingAccount} onClose={() => setEditingAccount(null)} onUpdated={handleUpdated} />}
       {deletingAccount && <DeleteSubAccountDialog key={deletingAccount.id} account={deletingAccount} onClose={() => setDeletingAccount(null)} onDeleted={handleDeleted} />}
