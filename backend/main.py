@@ -133,6 +133,9 @@ class SessionStore:
         self.lock = threading.RLock()
         with self.lock:
             with self.connection.transaction():
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('gys-schema-init', 0))"
+                )
                 for statement in (
                     "CREATE EXTENSION IF NOT EXISTS citext",
                     """
