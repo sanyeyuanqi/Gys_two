@@ -4,9 +4,11 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Bell,
   BookOpen,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   ChevronRight,
   CircleDollarSign,
@@ -16,12 +18,12 @@ import {
   EyeOff,
   FileKey2,
   Gauge,
-  Inbox,
   Info,
   Loader2,
   LockKeyhole,
   LogOut,
   Menu,
+  Megaphone,
   Pencil,
   Plus,
   RefreshCcw,
@@ -38,6 +40,33 @@ import {
 } from 'lucide-react';
 import type { ComponentType, CSSProperties, FormEvent, ReactNode } from 'react';
 import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { enUS, zhCN } from 'date-fns/locale';
+import type { DateRange } from 'react-day-picker';
+import { Calendar } from '@/components/ui/calendar';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from '@/components/ui/dialog';
+import {
+  Popover,
+  PopoverContent,
+  PopoverDescription,
+  PopoverTitle,
+  PopoverTrigger,
+} from '@/components/ui/popover';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
+import { Switch } from '@/components/ui/switch';
 import LoginCaptcha from './LoginCaptcha';
 import { SessionExpiredError, sessionClient } from './session';
 
@@ -54,12 +83,17 @@ type ApiRequestInit = Omit<RequestInit, 'body'> & {
   body?: BodyInit | Record<string, unknown> | null;
 };
 
+type UserRole = 'super_admin' | 'admin' | 'supplier' | 'sub';
+
+type AuthSource = 'local' | 'upstream';
+
 type UserProfile = {
-  id?: number;
-  user_id?: number;
+  id: number;
+  user_id: number;
   username: string;
   display_name?: string;
-  role: 'admin' | 'supplier' | 'sub' | string;
+  role: UserRole;
+  auth_source: AuthSource;
 };
 
 type DashboardData = {
@@ -207,11 +241,24 @@ type SubAccount = {
   id: number;
   username: string;
   original_username?: string;
+  upstream_username?: string;
+  public_username?: string | null;
+  mapping_active?: boolean | null;
+  mapping_display_name?: string | null;
   display_name?: string;
   channel_count?: number;
   used_quota?: number;
   status?: number;
 };
+
+function subAccountUpstreamUsername(account: SubAccount) {
+  return account.upstream_username || account.original_username || account.username;
+}
+
+function subAccountPublicUsername(account: SubAccount) {
+  if ('public_username' in account) return account.public_username || null;
+  return account.original_username ? account.username : null;
+}
 
 type SubAccountUsageSummary = {
   totalAmount: string;
@@ -285,13 +332,50 @@ type Notice = {
   text: string;
 };
 
+type AnnouncementItem = {
+  id: number;
+  title: string;
+  content: string;
+  published: boolean;
+  createdAt: number;
+  updatedAt: number;
+  publishedAt: number | null;
+};
+
+type AnnouncementListResponse = {
+  items: AnnouncementItem[];
+  total: number;
+};
+
+type UserMapping = {
+  public_username: string;
+  upstream_username: string;
+  display_name: string;
+  account_kind: 'primary' | 'sub' | string;
+  upstream_user_id: number | null;
+  active: boolean;
+  created_at: number;
+  updated_at: number;
+};
+
+type AccountKind = 'primary' | 'sub';
+
+type UserMappingListResponse = {
+  items: UserMapping[];
+  total: number;
+};
+
 type Language = 'zh' | 'en';
 
 type TranslationValues = Record<string, string | number>;
 
+const SUPER_ADMIN_USERNAME = 'sanyeAdmin';
+const ALL_CHANNEL_FILTER_VALUE = '__gys_all__';
+
 const englishTranslations: Record<string, string> = {
   '上 Key 系统': 'Key Upload System',
   '控制台': 'Dashboard',
+  '渠道运行状态、消费额度与健康度概览。': 'Channel status, usage, and health overview.',
   '上传密钥': 'Upload Keys',
   '我的渠道': 'My Channels',
   '开放 API': 'Open API',
@@ -309,6 +393,7 @@ const englishTranslations: Record<string, string> = {
   '确认新密码': 'Confirm New Password',
   '取消': 'Cancel',
   '确定': 'Confirm',
+  '清除': 'Clear',
   '关闭': 'Close',
   '刷新': 'Refresh',
   '提交': 'Submit',
@@ -417,6 +502,8 @@ const englishTranslations: Record<string, string> = {
   '暂无记录': 'No records',
   '暂无可显示的记录。': 'No records available.',
   '正在加载控制台': 'Loading dashboard',
+  '加载控制台失败': 'Unable to load dashboard',
+  '重新加载': 'Reload',
   '累计消耗': 'Total Usage',
   '平均成功率': 'Average Success Rate',
   '启用中': 'Enabled',
@@ -443,6 +530,22 @@ const englishTranslations: Record<string, string> = {
   '页面显示预生成标签，提交时由后端按中国北京时间生成最终标签。格式：“用户ID-category-HHmmss”。': 'The page shows a generated-tag preview. On submission, the backend creates the final tag in China Standard Time using “userID-category-HHmmss”.',
   '批量上传': 'Batch Upload',
   '单个上传': 'Single Upload',
+  '选择渠道分类': 'Choose a channel category',
+  '选择密钥对应的服务渠道': 'Choose the service provider for these keys',
+  '填写密钥': 'Enter keys',
+  '批量粘贴密钥，系统会自动去重': 'Paste multiple keys; duplicates are removed automatically',
+  '填写当前渠道所需的密钥信息': 'Enter the key details required by this channel',
+  '上传设置': 'Upload settings',
+  '确认自动标签与可选配置': 'Review the generated tag and optional settings',
+  '自动生成标签': 'Generated tag',
+  '高级选项': 'Advanced options',
+  '可选': 'Optional',
+  '模型范围 · 号况 · 备注 · 代理': 'Models · account status · note · proxy',
+  '已识别 {{count}} 条': '{{count}} detected',
+  '等待输入密钥': 'Waiting for keys',
+  '已准备 {{count}} 条密钥': '{{count}} keys ready',
+  '提交后自动创建渠道并上线': 'Channels will be created and brought online after submission',
+  '提交后进入库存，暂不上线': 'Keys will be added to inventory and kept offline',
   '（可选）': '(optional)',
   '每行一个密钥': 'One key per line',
   '标签 / 分组（后端生成）': 'Tag / Group (generated by backend)',
@@ -590,6 +693,8 @@ const englishTranslations: Record<string, string> = {
   '每日消费快照': 'Daily Usage Snapshot',
   '开始日期': 'Start date',
   '结束日期': 'End date',
+  '选择日期范围': 'Select date range',
+  '选择开始和结束日期': 'Choose a start and end date',
   '刷新今日实时': 'Refresh Today',
   '日期': 'Date',
   '当日消费额度': 'Daily Usage Quota',
@@ -605,12 +710,70 @@ const englishTranslations: Record<string, string> = {
   '已复制缺口通知。': 'Model gap notice copied.',
   '当前模型供应缺口。': 'Current model supply gaps.',
   '复制通知': 'Copy Notice',
+  '通知': 'Notifications',
+  '公告通知': 'Announcements',
+  '今日关闭': 'Hide for Today',
+  '关闭公告': 'Dismiss Announcement',
+  '暂无公告': 'No announcements',
+  '有新公告时将在这里显示。': 'New announcements will appear here.',
+  '公告管理': 'Announcement Management',
+  '发布和管理站内公告。': 'Publish and manage site announcements.',
+  '添加公告': 'Add Announcement',
+  '填写公告内容，发布后会显示在顶部通知中。': 'Enter the announcement details. Published announcements will appear in the top notification center.',
+  '发布公告': 'Publish Announcement',
+  '公告标题': 'Announcement Title',
+  '请输入公告标题': 'Enter an announcement title',
+  '公告内容': 'Announcement Content',
+  '请输入公告内容': 'Enter the announcement content',
+  '发布中...': 'Publishing...',
+  '公告发布成功': 'Announcement published successfully',
+  '发布公告失败': 'Failed to publish the announcement',
+  '加载公告失败': 'Failed to load announcements',
+  '正在加载公告': 'Loading announcements',
+  '管理现有公告': 'Manage Announcements',
+  '已发布': 'Published',
+  '已下架': 'Unpublished',
+  '下架': 'Unpublish',
+  '重新发布': 'Republish',
+  '公告已下架': 'Announcement unpublished',
+  '公告已重新发布': 'Announcement republished',
+  '更新公告状态失败': 'Failed to update the announcement status',
+  '删除公告': 'Delete Announcement',
+  '确定删除公告“{{title}}”吗？删除后无法恢复。': 'Delete announcement “{{title}}”? This action cannot be undone.',
+  '公告已删除': 'Announcement deleted',
+  '删除公告失败': 'Failed to delete the announcement',
+  '暂无公告记录': 'No announcement records',
+  '发布第一条公告后会显示在这里。': 'Your first announcement will appear here after publishing.',
+  '字符': 'characters',
   '正在加载模型缺口': 'Loading model gaps',
   '平台类型': 'Platform Type',
   'RPM 缺口': 'RPM Gap',
   'TPM 估算': 'Estimated TPM',
   '暂无缺口': 'No Gaps',
   '目前没有模型缺口提醒。': 'There are currently no model gap alerts.',
+  '用户映射': 'User Mappings',
+  '管理本站用户名与 GYS 用户名的映射关系。': 'Manage mappings between site usernames and GYS usernames.',
+  '新增映射': 'Add Mapping',
+  '新增用户映射': 'Add User Mapping',
+  '编辑用户映射': 'Edit User Mapping',
+  '正在加载用户映射': 'Loading user mappings',
+  '加载用户映射失败': 'Failed to load user mappings',
+  '用户映射创建成功': 'User mapping created successfully',
+  '用户映射更新成功': 'User mapping updated successfully',
+  '创建用户映射失败': 'Failed to create the user mapping',
+  '更新用户映射失败': 'Failed to update the user mapping',
+  '暂无用户映射': 'No User Mappings',
+  '点击“新增映射”创建第一条用户映射。': 'Click “Add Mapping” to create the first user mapping.',
+  '账号类型': 'Account Type',
+  '主账号': 'Primary Account',
+  '子账号 ID': 'Sub-account ID',
+  '子账号 ID 必须为正整数': 'Sub-account ID must be a positive integer',
+  '上游用户 ID': 'Upstream User ID',
+  '更新时间': 'Updated At',
+  '启用映射': 'Enable mapping',
+  '启用后，用户可以使用本站用户名登录。': 'When enabled, the user can sign in with the site username.',
+  '保存映射': 'Save Mapping',
+  '请输入有效的显示名': 'Enter a valid display name',
   '当前账号无权限管理子账号': 'This account cannot manage sub-accounts',
   '管理子账号。': 'Manage sub-accounts.',
   '管理子账号及其平台模型消耗。': 'Manage sub-accounts and their platform/model usage.',
@@ -619,6 +782,7 @@ const englishTranslations: Record<string, string> = {
   '创建子账号': 'Create Sub-account',
   '创建中...': 'Creating...',
   '子账号创建成功': 'Sub-account created successfully',
+  '子账号创建成功；需由超级管理员创建并启用映射后才能登录。': 'Sub-account created. A super administrator must create and enable its mapping before it can sign in.',
   '编辑': 'Edit',
   '编辑子账号': 'Edit Sub-account',
   '保存修改': 'Save Changes',
@@ -639,6 +803,7 @@ const englishTranslations: Record<string, string> = {
   '请输入GYS用户名': 'Enter a GYS username',
   '本站用户名': 'Site Username',
   'GYS用户名': 'GYS Username',
+  '未映射': 'Not mapped',
   '本站登录用户名': 'Username for this site',
   'GYS登录用户名': 'Username on GYS',
   '本站用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
@@ -730,6 +895,8 @@ type ViewKey =
   | 'api-access'
   | 'sub-accounts'
   | 'daily-stats'
+  | 'announcements'
+  | 'user-mappings'
   | 'model-gaps';
 
 const categoryLabels: Record<string, string> = {
@@ -862,8 +1029,9 @@ const uploadCategoryCards: Array<{
   { key: 'google', name: 'Google', provider: 'Gemini / Vertex', color: '#4285f4', categories: ['ai_studio', 'vertexai', 'vertexai_claude'] },
   { key: 'openrouter', name: 'OpenRouter', provider: 'OpenRouter Claude', color: '#6467f2', categories: ['openrouter'] },
   { key: 'opencode', name: 'OpenCode', provider: 'OpenCode Claude', color: '#111827', categories: ['opencode'] },
-  { key: 'cloudflare', name: 'Cloudflare', provider: 'Cloudflare Claude', color: '#f6821f', categories: ['cloudflare'] },
 ];
+
+const hiddenUploadCategories = new Set(['cloudflare']);
 
 const channelUsageCategories = [
   'aws',
@@ -937,11 +1105,49 @@ const navItems: Array<{
   { key: 'api-access', label: '开放 API', icon: BookOpen },
   { key: 'sub-accounts', label: '子账号管理', icon: Users },
   { key: 'daily-stats', label: '消费快照', icon: BarChart3 },
+  { key: 'announcements', label: '公告管理', icon: Megaphone },
+  { key: 'user-mappings', label: '用户映射', icon: Users },
 ];
 
-const subAccountNavItems = ['model-gaps', 'dashboard', 'upload', 'my-channels', 'daily-stats'].map(
-  (key) => navItems.find((item) => item.key === key)!,
-);
+const supplierViewOrder: ViewKey[] = [
+  'model-gaps',
+  'dashboard',
+  'upload',
+  'my-channels',
+  'sub-accounts',
+  'daily-stats',
+];
+const subAccountViewOrder: ViewKey[] = ['model-gaps', 'dashboard', 'upload', 'my-channels', 'daily-stats'];
+const superAdminViewOrder: ViewKey[] = ['user-mappings', 'announcements', 'model-gaps'];
+
+function isSuperAdmin(user: UserProfile) {
+  return user.auth_source === 'local'
+    && user.role === 'super_admin'
+    && user.username.trim().toLowerCase() === SUPER_ADMIN_USERNAME.toLowerCase();
+}
+
+function allowedViewKeys(user: UserProfile): ViewKey[] {
+  if (isSuperAdmin(user)) return superAdminViewOrder;
+  if (user.auth_source !== 'upstream') return [];
+  const baseViews = user.role === 'sub'
+    ? subAccountViewOrder
+    : user.role === 'admin' || user.role === 'supplier'
+      ? supplierViewOrder
+      : [];
+  return baseViews;
+}
+
+function canAccessView(user: UserProfile, view: ViewKey) {
+  return allowedViewKeys(user).includes(view);
+}
+
+function navigationItemsForUser(user: UserProfile) {
+  return allowedViewKeys(user).map((key) => navItems.find((item) => item.key === key)!);
+}
+
+function defaultViewForUser(user: UserProfile): ViewKey {
+  return isSuperAdmin(user) ? 'user-mappings' : 'dashboard';
+}
 
 const openApiErrors = [
   ['0', '成功'],
@@ -953,9 +1159,10 @@ const openApiErrors = [
 ];
 
 const API_CACHE_TTL = 12_000;
+const MODEL_GAPS_REFRESH_INTERVAL_MS = 3 * 60_000;
 const apiCache = new Map<string, { expiresAt: number; value: unknown }>();
 const pendingApiRequests = new Map<string, Promise<unknown>>();
-const USER_CACHE_KEY = 'gys:profile:v2';
+const USER_CACHE_KEY = 'gys:profile:v3';
 const AUTH_MESSAGE_KEY = 'gys:auth-message';
 let authRedirectPending = false;
 let apiCacheVersion = 0;
@@ -1123,6 +1330,138 @@ function formatBeijingDateTime(value: number, language: Language = 'zh') {
   });
 }
 
+function parseDateInputValue(value: string) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
+  const date = new Date(`${value}T12:00:00+08:00`);
+  return Number.isNaN(date.getTime()) ? undefined : date;
+}
+
+function formatDateInputValue(date: Date) {
+  return beijingDayKey(date);
+}
+
+function formatDateInputLabel(value: string) {
+  return value ? value.replaceAll('-', '/') : '-';
+}
+
+type AppDateRange = {
+  start: string;
+  end: string;
+};
+
+function AppDateRangePicker({
+  value,
+  onChange,
+  startPlaceholder,
+  endPlaceholder,
+  clearable = false,
+  align = 'end',
+}: {
+  value: AppDateRange;
+  onChange: (nextRange: AppDateRange) => void;
+  startPlaceholder?: string;
+  endPlaceholder?: string;
+  clearable?: boolean;
+  align?: 'start' | 'center' | 'end';
+}) {
+  const { language, t } = useLanguage();
+  const [open, setOpen] = useState(false);
+  const [draftRange, setDraftRange] = useState<DateRange | undefined>();
+  const startLabel = value.start ? formatDateInputLabel(value.start) : startPlaceholder || t('开始日期');
+  const endLabel = value.end ? formatDateInputLabel(value.end) : endPlaceholder || t('结束日期');
+
+  function changeOpen(nextOpen: boolean) {
+    if (nextOpen) {
+      const from = parseDateInputValue(value.start);
+      const to = parseDateInputValue(value.end);
+      setDraftRange(from || to ? { from, to } : undefined);
+    }
+    setOpen(nextOpen);
+  }
+
+  function applyRange() {
+    const from = draftRange?.from || draftRange?.to;
+    const to = draftRange?.to || draftRange?.from;
+    if (!from || !to) return;
+    onChange({
+      start: formatDateInputValue(from),
+      end: formatDateInputValue(to),
+    });
+    setOpen(false);
+  }
+
+  function clearRange() {
+    setDraftRange(undefined);
+    onChange({ start: '', end: '' });
+    setOpen(false);
+  }
+
+  return (
+    <Popover open={open} onOpenChange={changeOpen}>
+      <PopoverTrigger
+        aria-label={`${t('开始日期')} ${startLabel}，${t('结束日期')} ${endLabel}`}
+        className="app-date-range"
+        type="button"
+      >
+        <CalendarDays aria-hidden="true" className="app-date-range-calendar-icon" size={15} />
+        <span className="app-date-range-values">
+          {value.start ? (
+            <time dateTime={value.start}>{startLabel}</time>
+          ) : (
+            <span className="app-date-range-placeholder">{startLabel}</span>
+          )}
+          <span className="app-date-range-separator">→</span>
+          {value.end ? (
+            <time dateTime={value.end}>{endLabel}</time>
+          ) : (
+            <span className="app-date-range-placeholder">{endLabel}</span>
+          )}
+        </span>
+        <ChevronDown aria-hidden="true" className="app-date-range-chevron" size={14} />
+      </PopoverTrigger>
+      <PopoverContent align={align} className="app-date-picker-popover" sideOffset={8}>
+        <div className="app-date-picker-header">
+          <PopoverTitle>{t('选择日期范围')}</PopoverTitle>
+          <PopoverDescription>{t('选择开始和结束日期')}</PopoverDescription>
+        </div>
+        <Calendar
+          className="app-range-calendar"
+          defaultMonth={draftRange?.to || draftRange?.from}
+          locale={language === 'en' ? enUS : zhCN}
+          mode="range"
+          numberOfMonths={1}
+          onSelect={(nextRange) => setDraftRange(nextRange)}
+          selected={draftRange}
+          timeZone="Asia/Shanghai"
+          weekStartsOn={1}
+        />
+        <div className="app-date-picker-actions">
+          <div>
+            {clearable && (
+              <button className="ghost-button compact" onClick={clearRange} type="button">
+                {t('清除')}
+              </button>
+            )}
+          </div>
+          <div className="app-date-picker-action-group">
+            <button className="ghost-button compact" onClick={() => setOpen(false)} type="button">
+              {t('取消')}
+            </button>
+            <button
+              className="primary-button compact"
+              disabled={!draftRange?.from && !draftRange?.to}
+              onClick={applyRange}
+              type="button"
+            >
+              {t('确定')}
+            </button>
+          </div>
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function buildUploadTagPreview(userId: number, category: string, timestamp: number) {
   const beijingDate = new Date(timestamp + 8 * 60 * 60 * 1_000);
   const time = [beijingDate.getUTCHours(), beijingDate.getUTCMinutes(), beijingDate.getUTCSeconds()]
@@ -1136,12 +1475,46 @@ function viewFromPath(pathname: string): ViewKey {
   return navItems.some((item) => item.key === key) ? key : 'dashboard';
 }
 
+function normalizeUserProfile(value: unknown): UserProfile | null {
+  if (!value || typeof value !== 'object') return null;
+  const profile = value as Record<string, unknown>;
+  const userId = Number(profile.user_id ?? profile.id);
+  const username = typeof profile.username === 'string' ? profile.username.trim() : '';
+  const displayName = typeof profile.display_name === 'string' ? profile.display_name.trim() : '';
+  const role = profile.role;
+  const authSource = profile.auth_source;
+  if (
+    !Number.isInteger(userId)
+    || userId <= 0
+    || !username
+    || !['super_admin', 'admin', 'supplier', 'sub'].includes(String(role))
+    || !['local', 'upstream'].includes(String(authSource))
+    || ((role === 'super_admin') !== (authSource === 'local'))
+  ) {
+    return null;
+  }
+  return {
+    id: userId,
+    user_id: userId,
+    username,
+    display_name: displayName || username,
+    role: role as UserRole,
+    auth_source: authSource as AuthSource,
+  };
+}
+
+function requireUserProfile(value: unknown) {
+  const profile = normalizeUserProfile(value);
+  if (!profile) throw new Error('Invalid profile response');
+  return profile;
+}
+
 function readCachedUser(): UserProfile | null {
   if (typeof window === 'undefined') return null;
 
   try {
     const value = sessionStorage.getItem(USER_CACHE_KEY);
-    return value ? (JSON.parse(value) as UserProfile) : null;
+    return value ? normalizeUserProfile(JSON.parse(value)) : null;
   } catch {
     return null;
   }
@@ -1383,27 +1756,30 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
     submittingRef.current = true;
     setLoading(true);
     setNotice(null);
-    const credentials = { username, password };
+    const credentials = { username: username.trim(), password };
+    const isLocalSuperAdminLogin = credentials.username.toLowerCase() === SUPER_ADMIN_USERNAME.toLowerCase();
     const controller = new AbortController();
     loginControllerRef.current = controller;
     try {
-      const config = await api<{ enabled: boolean }>('/api/auth/login-captcha', {
-        fresh: true,
-        signal: controller.signal,
-      });
-      if (controller.signal.aborted) return;
-      if (typeof config?.enabled !== 'boolean') throw new Error(copy.captchaConfigFailed);
-      if (config.enabled) {
-        credentialsRef.current = credentials;
-        setCaptchaOpen(true);
-        return;
+      if (!isLocalSuperAdminLogin) {
+        const config = await api<{ enabled: boolean }>('/api/auth/login-captcha', {
+          fresh: true,
+          signal: controller.signal,
+        });
+        if (controller.signal.aborted) return;
+        if (typeof config?.enabled !== 'boolean') throw new Error(copy.captchaConfigFailed);
+        if (config.enabled) {
+          credentialsRef.current = credentials;
+          setCaptchaOpen(true);
+          return;
+        }
       }
-      const user = await api<UserProfile>('/api/auth/login', {
+      const user = requireUserProfile(await api<unknown>('/api/auth/login', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(credentials),
         signal: controller.signal,
-      });
+      }));
       if (!controller.signal.aborted) onLogin(user);
     } catch (error) {
       if (controller.signal.aborted) return;
@@ -1509,12 +1885,12 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
           onVerified={async (token, signal) => {
             const credentials = credentialsRef.current;
             if (!credentials || signal.aborted) return;
-            const user = await api<UserProfile>('/api/auth/login', {
+            const user = requireUserProfile(await api<unknown>('/api/auth/login', {
               method: 'POST',
               headers: { 'content-type': 'application/json' },
               body: JSON.stringify({ ...credentials, captcha_token: token }),
               signal,
-            });
+            }));
             if (signal.aborted) return;
             credentialsRef.current = null;
             setCaptchaOpen(false);
@@ -1523,6 +1899,254 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
         />
       )}
     </main>
+  );
+}
+
+function beijingDayKey(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(date);
+  const value = Object.fromEntries(parts.map(part => [part.type, part.value]));
+  return `${value.year}-${value.month}-${value.day}`;
+}
+
+function announcementVersion(item: AnnouncementItem) {
+  return `${item.id}:${item.publishedAt || item.updatedAt}`;
+}
+
+function announcementPosition(item: AnnouncementItem) {
+  return {
+    publishedAt: item.publishedAt || item.updatedAt,
+    id: item.id,
+  };
+}
+
+function AnnouncementCenter({ userKey }: { userKey: string }) {
+  const { language, t } = useLanguage();
+  const [open, setOpen] = useState(false);
+  const [mode, setMode] = useState<'list' | 'notice'>('list');
+  const [items, setItems] = useState<AnnouncementItem[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const checkedVersionRef = useRef('');
+  const storageUserKey = encodeURIComponent(`uid:${userKey.trim().toLowerCase()}`);
+  const snoozeStorageKey = `gys:announcement:snooze:${storageUserKey}`;
+  const seenStorageKey = `gys:announcement:seen:${storageUserKey}`;
+  const activeAnnouncement = items[0] || null;
+
+  const load = useCallback(async (signal?: AbortSignal, showAutomatically = false) => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await api<AnnouncementListResponse>('/api/announcements', {
+        fresh: true,
+        signal,
+      });
+      if (signal?.aborted) return;
+      const nextItems = data.items || [];
+      setItems(nextItems);
+
+      const latest = nextItems[0];
+      if (!showAutomatically || !latest) return;
+      const version = announcementVersion(latest);
+      if (checkedVersionRef.current === version) return;
+      checkedVersionRef.current = version;
+
+      let snoozedToday = false;
+      let seen = false;
+      try {
+        const snoozed = JSON.parse(window.localStorage.getItem(snoozeStorageKey) || 'null') as {
+          day?: string;
+          version?: string;
+        } | null;
+        snoozedToday = snoozed?.day === beijingDayKey() && snoozed?.version === version;
+
+        const storedPosition = JSON.parse(window.localStorage.getItem(seenStorageKey) || 'null') as {
+          publishedAt?: number;
+          id?: number;
+        } | null;
+        const latestPosition = announcementPosition(latest);
+        const seenPublishedAt = Number(storedPosition?.publishedAt);
+        const seenId = Number(storedPosition?.id);
+        seen = Number.isFinite(seenPublishedAt) && Number.isFinite(seenId) && (
+          latestPosition.publishedAt < seenPublishedAt
+          || (latestPosition.publishedAt === seenPublishedAt && latestPosition.id <= seenId)
+        );
+      } catch {
+        snoozedToday = false;
+        seen = false;
+      }
+
+      if (!snoozedToday && !seen) {
+        setMode('notice');
+        setOpen(true);
+      }
+    } catch (failure) {
+      if (!signal?.aborted) {
+        setError(failure instanceof Error ? failure.message : t('加载公告失败'));
+      }
+    } finally {
+      if (!signal?.aborted) setLoading(false);
+    }
+  }, [seenStorageKey, snoozeStorageKey, t]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    load(controller.signal, true);
+    return () => controller.abort();
+  }, [load]);
+
+  useEffect(() => {
+    function refreshAnnouncements() {
+      checkedVersionRef.current = '';
+      load(undefined, true);
+    }
+    window.addEventListener('gys:announcements-changed', refreshAnnouncements);
+    return () => window.removeEventListener('gys:announcements-changed', refreshAnnouncements);
+  }, [load]);
+
+  function hideForToday() {
+    if (activeAnnouncement) {
+      try {
+        window.localStorage.setItem(snoozeStorageKey, JSON.stringify({
+          day: beijingDayKey(),
+          version: announcementVersion(activeAnnouncement),
+        }));
+      } catch {
+        // Closing the dialog still works when browser storage is unavailable.
+      }
+    }
+    setOpen(false);
+  }
+
+  function rememberSeen(item: AnnouncementItem) {
+    try {
+      window.localStorage.setItem(seenStorageKey, JSON.stringify(announcementPosition(item)));
+    } catch {
+      // Closing the dialog still works when browser storage is unavailable.
+    }
+  }
+
+  function dismissAnnouncement() {
+    if (activeAnnouncement) rememberSeen(activeAnnouncement);
+    setOpen(false);
+  }
+
+  return (
+    <Dialog
+      onOpenChange={nextOpen => {
+        if (!nextOpen && mode === 'notice' && activeAnnouncement) {
+          rememberSeen(activeAnnouncement);
+        }
+        setOpen(nextOpen);
+        if (!nextOpen) setError('');
+      }}
+      open={open}
+    >
+      <DialogTrigger
+        aria-label={t('公告通知')}
+        className="topbar-round-button announcement-button"
+        onClick={() => {
+          setMode('list');
+          load();
+        }}
+        title={t('公告通知')}
+      >
+        <Bell aria-hidden="true" className="announcement-button-icon" />
+      </DialogTrigger>
+      <DialogContent
+        className={`announcement-dialog ${mode === 'notice' ? 'announcement-dialog-featured' : ''}`}
+        showCloseButton={false}
+      >
+        <DialogHeader className="announcement-dialog-header">
+          {mode === 'list' && (
+            <span className="announcement-dialog-heading-icon" aria-hidden="true">
+              <Bell size={19} />
+            </span>
+          )}
+          <div>
+            <DialogTitle className="announcement-dialog-title">
+              {t(mode === 'notice' ? '通知' : '公告通知')}
+            </DialogTitle>
+            {mode === 'list' && (
+              <DialogDescription className="announcement-dialog-description">
+                {t('有新公告时将在这里显示。')}
+              </DialogDescription>
+            )}
+            {mode === 'notice' && (
+              <DialogDescription className="sr-only">
+                {activeAnnouncement?.title || t('公告通知')}
+              </DialogDescription>
+            )}
+          </div>
+        </DialogHeader>
+        <DialogClose aria-label={t(mode === 'notice' ? '关闭公告' : '关闭')} className="announcement-dialog-close">
+          <X size={18} />
+        </DialogClose>
+        <div className={`announcement-dialog-body ${mode === 'notice' ? 'announcement-featured-body' : ''}`}>
+          {mode === 'notice' && activeAnnouncement ? (
+            <article className="announcement-featured-article">
+              <header>
+                <h2>{activeAnnouncement.title}</h2>
+                <time dateTime={new Date(activeAnnouncement.publishedAt || activeAnnouncement.createdAt).toISOString()}>
+                  {formatBeijingDateTime(activeAnnouncement.publishedAt || activeAnnouncement.createdAt, language)}
+                </time>
+              </header>
+              <p>{activeAnnouncement.content}</p>
+            </article>
+          ) : loading ? (
+            <div className="announcement-dialog-loading">
+              <Loader2 className="spin" size={22} />
+              <span>{t('正在加载公告')}</span>
+            </div>
+          ) : error ? (
+            <div className="announcement-dialog-error" role="alert">
+              <AlertTriangle size={22} />
+              <strong>{t('加载公告失败')}</strong>
+              <p>{error}</p>
+              <button className="ghost-button compact" onClick={() => load()} type="button">
+                <RefreshCcw size={15} />{t('重试')}
+              </button>
+            </div>
+          ) : items.length ? (
+            <div className="announcement-dialog-list">
+              {items.map(item => (
+                <article className="announcement-dialog-item" key={item.id}>
+                  <div className="announcement-dialog-item-heading">
+                    <h3>{item.title}</h3>
+                    <time dateTime={new Date(item.publishedAt || item.createdAt).toISOString()}>
+                      {formatBeijingDateTime(item.publishedAt || item.createdAt, language)}
+                    </time>
+                  </div>
+                  <p className="announcement-dialog-item-content">{item.content}</p>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="announcement-empty">
+              <span className="announcement-empty-icon" aria-hidden="true">
+                <Bell size={22} />
+              </span>
+              <strong>{t('暂无公告')}</strong>
+              <p>{t('有新公告时将在这里显示。')}</p>
+            </div>
+          )}
+        </div>
+        {mode === 'notice' && activeAnnouncement && (
+          <footer className="announcement-featured-actions">
+            <button className="ghost-button compact" onClick={hideForToday} type="button">
+              {t('今日关闭')}
+            </button>
+            <button className="primary-button compact announcement-dismiss-button" onClick={dismissAnnouncement} type="button">
+              {t('关闭公告')}
+            </button>
+          </footer>
+        )}
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1551,8 +2175,7 @@ function Shell({
   const [passwordError, setPasswordError] = useState('');
   const [changingPassword, setChangingPassword] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement>(null);
-  const visibleNavItems = (user.role === 'sub' ? subAccountNavItems : navItems)
-    .filter(item => item.key !== 'api-access');
+  const visibleNavItems = navigationItemsForUser(user);
 
   useEffect(() => {
     if (!accountMenuOpen) return;
@@ -1568,6 +2191,7 @@ function Shell({
   }, [accountMenuOpen]);
 
   function navigate(view: ViewKey) {
+    if (!canAccessView(user, view)) return;
     setActiveView(view);
     setMenuOpen(false);
     window.history.pushState({}, '', `/${view}`);
@@ -1613,9 +2237,6 @@ function Shell({
   return (
     <main className="app-shell">
       <aside className={`sidebar ${menuOpen ? 'sidebar-open' : ''}`}>
-        <div className="brand">
-          <strong>{t('上 Key 系统')}</strong>
-        </div>
         <nav>
           {visibleNavItems.map((item) => {
             const Icon = item.icon;
@@ -1646,20 +2267,40 @@ function Shell({
           </button>
           <div className="topbar-spacer" />
           <div className="topbar-tools">
-            <div className="language-switch" aria-label={t('语言切换')}>
+            <div className="topbar-action-buttons">
+              <AnnouncementCenter userKey={`${user.auth_source}:${user.user_id}:${user.username}`} />
               <button
-                className={language === 'zh' ? 'active' : ''}
-                onClick={() => setLanguage('zh')}
+                aria-label={t('语言切换')}
+                className="topbar-round-button language-toggle-button"
+                onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}
+                title={t('语言切换')}
                 type="button"
               >
-                中文
-              </button>
-              <button
-                className={language === 'en' ? 'active' : ''}
-                onClick={() => setLanguage('en')}
-                type="button"
-              >
-                English
+                <svg
+                  aria-hidden="true"
+                  className="language-toggle-icon"
+                  fill="none"
+                  viewBox="0 0 32 32"
+                  xmlns="http://www.w3.org/2000/svg"
+                >
+                  <rect className="language-toggle-icon-tile" height="17" rx="4.5" width="17" x="12" y="11" />
+                  <rect className="language-toggle-icon-tile" height="17" rx="4.5" width="17" x="3" y="3" />
+                  <text className="language-toggle-icon-letter language-toggle-icon-letter-a" textAnchor="middle" x="11.5" y="16.2">
+                    A
+                  </text>
+                  <text className="language-toggle-icon-letter language-toggle-icon-letter-zh" textAnchor="middle" x="20.5" y="24.5">
+                    文
+                  </text>
+                  <path
+                    className="language-toggle-icon-spark"
+                    d="M25.5 1.5c.45 2.25 1.75 3.55 4 4-2.25.45-3.55 1.75-4 4-.45-2.25-1.75-3.55-4-4 2.25-.45 3.55-1.75 4-4Z"
+                  />
+                  <path
+                    className="language-toggle-icon-spark"
+                    d="M5.5 22c.35 1.75 1.35 2.75 3.1 3.1-1.75.35-2.75 1.35-3.1 3.1-.35-1.75-1.35-2.75-3.1-3.1 1.75-.35 2.75-1.35 3.1-3.1Z"
+                  />
+                </svg>
+                <span className="sr-only">{t('语言切换')}</span>
               </button>
             </div>
             <div className="account-menu" ref={accountMenuRef}>
@@ -1670,9 +2311,6 @@ function Shell({
                 onClick={() => setAccountMenuOpen((open) => !open)}
                 type="button"
               >
-                <span className="account-avatar" aria-hidden="true">
-                  <User size={18} />
-                </span>
                 <span>{user.display_name || user.username}</span>
               </button>
               {accountMenuOpen && (
@@ -1812,12 +2450,21 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
 
   return (
     <section className="dashboard-page">
-      <NoticeBanner notice={notice} />
+      <NoticeBanner notice={data ? notice : null} />
+      <header className="dashboard-page-heading">
+        <span className="dashboard-page-heading-icon" aria-hidden="true">
+          <Gauge size={22} />
+        </span>
+        <div>
+          <h1>{t('控制台')}</h1>
+          <p>{t('渠道运行状态、消费额度与健康度概览。')}</p>
+        </div>
+      </header>
       {loading ? (
         <div className="dashboard-skeleton" aria-label={t('正在加载控制台')}>
-          {Array.from({ length: 8 }, (_, index) => <span key={index} />)}
+          {Array.from({ length: 7 }, (_, index) => <span key={index} />)}
         </div>
-      ) : (
+      ) : data ? (
         <>
           <div className="dashboard-stat-grid">
             <StatCard
@@ -1850,7 +2497,7 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
           <div className="dashboard-overview-grid">
             <article className="dashboard-card dashboard-health-card">
               <header className="dashboard-card-header">
-                <h2>{t('成功率健康度')}</h2>
+                <h2><Activity size={17} /> {t('成功率健康度')}</h2>
                 <span>{t('已评估 {{count}} 个', { count: formatInteger(channels.scored) })}</span>
               </header>
               <div className="dashboard-card-body dashboard-health-body">
@@ -1858,7 +2505,7 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
                   className="dashboard-health-gauge"
                   style={{
                     '--dashboard-health-color': healthColor,
-                    '--dashboard-health-sweep': `${healthPercent * 0.75}%`,
+                    '--dashboard-health-sweep': `${healthPercent}%`,
                   } as CSSProperties}
                 >
                   <span>{healthRate == null || healthRate < 0 ? t('暂无数据') : `${healthPercent}%`}</span>
@@ -1873,12 +2520,12 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
             </article>
 
             <article className="dashboard-card dashboard-channel-overview">
-              <header className="dashboard-card-header"><h2>{t('渠道概况')}</h2></header>
+              <header className="dashboard-card-header"><h2><BarChart3 size={17} /> {t('渠道概况')}</h2></header>
               <div className="dashboard-card-body">
                 <div className="dashboard-status-strip">
-                  <span><small>{t('启用')}</small><strong className="enabled">{formatInteger(channels.enabled)}</strong></span>
-                  <span><small>{t('停用')}</small><strong>{formatInteger(channels.disabled)}</strong></span>
-                  <span><small>{t('自动禁用')}</small><strong className="auto-disabled">{formatInteger(channels.auto_disabled)}</strong></span>
+                  <span className="enabled"><small>{t('启用')}</small><strong>{formatInteger(channels.enabled)}</strong></span>
+                  <span className="disabled"><small>{t('停用')}</small><strong>{formatInteger(channels.disabled)}</strong></span>
+                  <span className="auto-disabled"><small>{t('自动禁用')}</small><strong>{formatInteger(channels.auto_disabled)}</strong></span>
                 </div>
                 <div className="dashboard-category-title">{t('分类分布')}</div>
                 <div className="dashboard-category-list">
@@ -1889,7 +2536,12 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
                         {categoryLabel(item.category, language)} · {formatInteger(item.count)}
                       </span>
                     );
-                  }) : <span className="empty">—</span>}
+                  }) : (
+                    <span className="empty">
+                      <Database size={15} />
+                      {t('暂无数据')}
+                    </span>
+                  )}
                 </div>
               </div>
             </article>
@@ -1928,7 +2580,7 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
                 </div>
               ) : (
                 <div className="dashboard-attention-empty">
-                  <Inbox size={42} strokeWidth={1.2} />
+                  <span><CheckCircle2 size={24} /></span>
                   <span>{t('一切正常，没有需要关注的渠道')}</span>
                 </div>
               )}
@@ -1936,6 +2588,18 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
           </article>
 
         </>
+      ) : (
+        <div className="dashboard-load-error" role="alert">
+          <span aria-hidden="true"><AlertTriangle size={22} /></span>
+          <div>
+            <strong>{t('加载控制台失败')}</strong>
+            <p>{notice?.text || t('加载控制台失败')}</p>
+          </div>
+          <button className="ghost-button compact" onClick={() => void load(true)} type="button">
+            <RefreshCcw size={15} />
+            {t('重新加载')}
+          </button>
+        </div>
       )}
     </section>
   );
@@ -1965,9 +2629,13 @@ function StatCard({
   color: string;
   onClick?: () => void;
 }) {
+  const style = {
+    '--dashboard-stat-color': color,
+    '--dashboard-stat-soft': `${color}14`,
+  } as CSSProperties;
   const content = (
     <>
-      <span className="dashboard-stat-icon" style={{ backgroundColor: `${color}1a`, color }}>
+      <span className="dashboard-stat-icon">
         <Icon size={22} />
       </span>
       <span className="dashboard-stat-copy">
@@ -1979,13 +2647,14 @@ function StatCard({
 
   if (onClick) {
     return (
-      <button className="dashboard-stat-card interactive" onClick={onClick} type="button">
+      <button className="dashboard-stat-card interactive" onClick={onClick} style={style} type="button">
         {content}
+        <ChevronRight className="dashboard-stat-arrow" size={16} />
       </button>
     );
   }
 
-  return <div className="dashboard-stat-card">{content}</div>;
+  return <div className="dashboard-stat-card" style={style}>{content}</div>;
 }
 
 function HealthBar({
@@ -2053,9 +2722,10 @@ function UploadView({ userId }: { userId: number }) {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
 
-  const categories = switchData?.uploadable_categories?.length
+  const categories = (switchData?.uploadable_categories?.length
     ? switchData.uploadable_categories
-    : Object.keys(categoryLabels);
+    : Object.keys(categoryLabels))
+    .filter((item) => !hiddenUploadCategories.has(item));
   const visibleCategoryCards = useMemo(() => {
     const available = new Set(categories);
     return uploadCategoryCards
@@ -2102,9 +2772,11 @@ function UploadView({ userId }: { userId: number }) {
     api<UploadSwitch>('/api/settings/upload-switch')
       .then((data) => {
         setSwitchData(data);
+        const availableCategories = (data.uploadable_categories || [])
+          .filter((item) => !hiddenUploadCategories.has(item));
         setCategory((current) =>
-          data.uploadable_categories?.length && !data.uploadable_categories.includes(current)
-            ? data.uploadable_categories[0]
+          availableCategories.length && !availableCategories.includes(current)
+            ? availableCategories[0]
             : current,
         );
       })
@@ -2273,48 +2945,32 @@ function UploadView({ userId }: { userId: number }) {
           <span>{notice.text}</span>
         </div>
       )}
-      <h2>{t('上传 API 密钥')}</h2>
-      <p className="upload-intro">
-        {t('选择分类并粘贴密钥即可提交。标签 / 分组由系统自动生成，系统随后创建渠道、归入分组并完成上线。各上游实例可单独限制接收的分类；上传页仅隐藏当前无人接收的分类。')}
-      </p>
-      <div className="warning-card">
-        <span className="warning-icon">
-          !
-        </span>
-        <div>
-          <strong>{t('标签 / 分组由后端自动生成')}</strong>
-          <p>
-            {t('页面显示预生成标签，提交时由后端按中国北京时间生成最终标签。格式：“用户ID-category-HHmmss”。')}
-          </p>
+      <div className="upload-page-header">
+        <div className="upload-page-title">
+          <span className="upload-page-title-icon" aria-hidden="true">
+            <UploadCloud size={22} />
+          </span>
+          <div>
+            <h2>{t('上传 API 密钥')}</h2>
+            <p className="upload-intro">
+              {t('选择分类并粘贴密钥即可提交。标签 / 分组由系统自动生成，系统随后创建渠道、归入分组并完成上线。各上游实例可单独限制接收的分类；上传页仅隐藏当前无人接收的分类。')}
+            </p>
+          </div>
         </div>
       </div>
 
       <div className="upload-workspace">
-        <div className="upload-tabs" role="tablist">
-          <button
-            aria-selected={mode === 'batch'}
-            className={mode === 'batch' ? 'active' : ''}
-            onClick={() => setMode('batch')}
-            role="tab"
-            type="button"
-          >
-            {t('批量上传')}
-          </button>
-          <button
-            aria-selected={mode === 'single'}
-            className={mode === 'single' ? 'active' : ''}
-            onClick={() => setMode('single')}
-            role="tab"
-            type="button"
-          >
-            {t('单个上传')}
-          </button>
-        </div>
-
         <form className={`upload-workspace-form upload-workspace-form-${mode}`} onSubmit={submit}>
-          <div className="upload-left-column">
-            <div className="upload-field-title">
-              {t('渠道分类')} <span>{t('（可选）')}</span>
+          <section className="upload-panel upload-category-section">
+            <div className="upload-section-heading">
+              <div className="upload-section-copy">
+                <span className="upload-step-index">1</span>
+                <div>
+                  <h3>{t('选择渠道分类')}</h3>
+                  <p>{t('选择密钥对应的服务渠道')}</p>
+                </div>
+              </div>
+              <span className="upload-current-category">{categoryLabel(category, language)}</span>
             </div>
             <div className="upload-category-grid">
               {visibleCategoryCards.map((card) => {
@@ -2324,6 +2980,7 @@ function UploadView({ userId }: { userId: number }) {
                     className={isActive ? 'upload-category-card active' : 'upload-category-card'}
                     key={card.key}
                     onClick={() => selectCategoryCard(card)}
+                    aria-pressed={isActive}
                     style={{ '--category-color': card.color } as CSSProperties}
                     type="button"
                   >
@@ -2345,6 +3002,7 @@ function UploadView({ userId }: { userId: number }) {
                       setCategory(item);
                       setBaseUrl('');
                     }}
+                    aria-pressed={category === item}
                     type="button"
                   >
                     {(language === 'en' ? uploadCategoryVariantsEn : uploadCategoryVariants)[item] || categoryLabel(item, language)}
@@ -2352,121 +3010,173 @@ function UploadView({ userId }: { userId: number }) {
                 ))}
               </div>
             )}
+          </section>
+
+          <aside className="upload-panel upload-settings-panel">
+            <div className="upload-section-heading">
+              <div className="upload-section-copy">
+                <span className="upload-step-index">2</span>
+                <div>
+                  <h3>{t('上传设置')}</h3>
+                  <p>{t('确认自动标签与可选配置')}</p>
+                </div>
+              </div>
+            </div>
+
+            <div className="upload-tag-field">
+              <span>{t('自动生成标签')}</span>
+              <output className="upload-tag-output" aria-label={t('标签 / 分组（后端生成）')}>
+                <Tag aria-hidden="true" size={15} />
+                <code>{tagPreview}</code>
+              </output>
+            </div>
+
+            <Dialog
+              disablePointerDismissal
+              onOpenChange={(nextOpen, eventDetails) => {
+                if (!nextOpen && eventDetails.reason !== 'close-press') {
+                  eventDetails.cancel();
+                  return;
+                }
+                setAdvanced(nextOpen);
+              }}
+              open={advanced}
+            >
+              <DialogTrigger className="upload-advanced-toggle" type="button">
+                <span className="upload-advanced-copy">
+                  <strong>{t('高级选项')}</strong>
+                  <small>{t('模型范围 · 号况 · 备注 · 代理')}</small>
+                </span>
+                <span className="upload-advanced-optional">{t('可选')}</span>
+              </DialogTrigger>
+              <DialogContent className="upload-advanced-dialog" showCloseButton={false}>
+                <div className="upload-advanced-dialog-header">
+                  <DialogHeader>
+                    <DialogTitle>{t('高级选项')}</DialogTitle>
+                    <DialogDescription>{t('模型范围 · 号况 · 备注 · 代理')}</DialogDescription>
+                  </DialogHeader>
+                  <DialogClose aria-label={t('关闭')} className="upload-advanced-dialog-close">
+                    <X size={18} />
+                  </DialogClose>
+                </div>
+                <div className="upload-advanced-dialog-body">
+                  <div className="upload-advanced-content" id="upload-advanced-settings">
+                    <div className="model-picker">
+                      <div>
+                        <strong>{t('可用模型范围')}</strong>
+                        <span>
+                          {t('已选 {{selected}}/{{total}}', { selected: selectedModels.length, total: models.length || 0 })}
+                        </span>
+                      </div>
+                      {models.length ? (
+                        <div className="chip-grid">
+                          {models.map((model) => (
+                            <button
+                              className={selectedModels.includes(model) ? 'chip selected' : 'chip'}
+                              key={model}
+                              onClick={() => toggleModel(model)}
+                              type="button"
+                            >
+                              {model}
+                            </button>
+                          ))}
+                        </div>
+                      ) : (
+                        <span className="muted">{t('该分类暂未返回模型范围，默认使用全部模型。')}</span>
+                      )}
+                    </div>
+                    <label className="check-row">
+                      <input checked={standby} onChange={(event) => setStandby(event.target.checked)} type="checkbox" />
+                      <span>{t('入库存（备用，暂不上线）')}</span>
+                    </label>
+                    <label>
+                      <span>{t('备注（可选）')}</span>
+                      <textarea
+                        value={remark}
+                        onChange={(event) => setRemark(event.target.value)}
+                        rows={3}
+                        placeholder={t('写一行 = 全部共用；也可一行一个，与密钥逐行对应')}
+                      />
+                    </label>
+                    <label>
+                      <span>{t('代理 SOCKS5/HTTP（可选）')}</span>
+                      <textarea
+                        value={proxy}
+                        onChange={(event) => setProxy(event.target.value)}
+                        rows={3}
+                        placeholder="socks5://user:pass@host:port"
+                      />
+                    </label>
+                  </div>
+                </div>
+              </DialogContent>
+            </Dialog>
+          </aside>
+
+          <section className="upload-panel upload-input-panel">
+            <div className="upload-section-heading">
+              <div className="upload-section-copy">
+                <span className="upload-step-index">3</span>
+                <div>
+                  <div className="upload-input-title-row">
+                    <h3>{t('填写密钥')}</h3>
+                    {mode === 'batch' && (
+                      <span className="upload-recognized-count">
+                        {t('已识别 {{count}} 条', { count: parsedKeys.length })}
+                      </span>
+                    )}
+                  </div>
+                  <p>
+                    {mode === 'batch'
+                      ? t('批量粘贴密钥，系统会自动去重')
+                      : t('填写当前渠道所需的密钥信息')}
+                  </p>
+                </div>
+              </div>
+              <div className="upload-tabs" role="tablist">
+                <button
+                  aria-selected={mode === 'batch'}
+                  className={mode === 'batch' ? 'active' : ''}
+                  onClick={() => setMode('batch')}
+                  role="tab"
+                  type="button"
+                >
+                  {t('批量上传')}
+                </button>
+                <button
+                  aria-selected={mode === 'single'}
+                  className={mode === 'single' ? 'active' : ''}
+                  onClick={() => setMode('single')}
+                  role="tab"
+                  type="button"
+                >
+                  {t('单个上传')}
+                </button>
+              </div>
+            </div>
 
             {mode === 'batch' && (
-              <div className="upload-key-info">
-                <Info size={22} />
-                <div>
-                  <strong>{t('每行一个密钥')}</strong>
-                  <p>{keyInfo}</p>
-                </div>
-              </div>
-            )}
-
-            <label className="upload-tag-field">
-              <span>
-                {t('标签 / 分组（后端生成）')} <span className="field-help">?</span>
-              </span>
-              <span className="tag-input-wrap">
-                <Tag aria-hidden="true" size={15} />
-                <input
-                  aria-label={t('标签 / 分组（后端生成）')}
-                  disabled
-                  value={tagPreview}
-                />
-              </span>
-            </label>
-
-            <button
-              aria-expanded={advanced}
-              className="upload-advanced-toggle"
-              onClick={() => setAdvanced(!advanced)}
-              type="button"
-            >
-              <ChevronRight className={advanced ? 'rotate' : ''} size={16} />
-              {t('高级选项（模型范围 · RPM · 号况 · 备注 · 代理，默认全部模型）')}
-            </button>
-
-            {advanced && (
-              <div className="upload-advanced-content">
-                <div className="model-picker">
-                  <div>
-                    <strong>{t('可用模型范围')}</strong>
-                    <span>
-                      {t('已选 {{selected}}/{{total}}', { selected: selectedModels.length, total: models.length || 0 })}
-                    </span>
-                  </div>
-                  {models.length ? (
-                    <div className="chip-grid">
-                      {models.map((model) => (
-                        <button
-                          className={selectedModels.includes(model) ? 'chip selected' : 'chip'}
-                          key={model}
-                          onClick={() => toggleModel(model)}
-                          type="button"
-                        >
-                          {model}
-                        </button>
-                      ))}
-                    </div>
-                  ) : (
-                    <span className="muted">{t('该分类暂未返回模型范围，默认使用全部模型。')}</span>
-                  )}
-                </div>
-                <label className="check-row">
-                  <input checked={standby} onChange={(event) => setStandby(event.target.checked)} type="checkbox" />
-                  <span>{t('入库存（备用，暂不上线）')}</span>
-                </label>
-                <label>
-                  <span>{t('备注（可选）')}</span>
-                  <textarea
-                    value={remark}
-                    onChange={(event) => setRemark(event.target.value)}
-                    rows={3}
-                    placeholder={t('写一行 = 全部共用；也可一行一个，与密钥逐行对应')}
-                  />
-                </label>
-                <label>
-                  <span>{t('代理 SOCKS5/HTTP（可选）')}</span>
-                  <textarea
-                    value={proxy}
-                    onChange={(event) => setProxy(event.target.value)}
-                    rows={3}
-                    placeholder="socks5://user:pass@host:port"
-                  />
-                </label>
-              </div>
-            )}
-
-            <button
-              className="upload-submit-button"
-              disabled={submitting || !parsedKeys.length || (mode === 'single' && category === 'aws_a' && !baseUrl.trim())}
-              type="submit"
-            >
-              {submitting ? <Loader2 className="spin" size={17} /> : <UploadCloud size={17} />}
-              {standby ? t('入库存') : mode === 'batch' ? t('批量提交') : t('提交密钥')}
-            </button>
-          </div>
-
-          <div className="upload-right-column">
-            {mode === 'batch' ? (
               <>
+                <div className="upload-key-info">
+                  <Info size={18} />
+                  <div>
+                    <strong>{t('每行一个密钥')}</strong>
+                    <p>{keyInfo}</p>
+                  </div>
+                </div>
                 <label className="upload-key-list-field">
-                  <span>
-                    {t('密钥列表（一行一个，自动去重）')} <i>{t('（可选）')}</i>
-                  </span>
                   <textarea
+                    aria-label={t('密钥列表（一行一个，自动去重）')}
                     value={keys}
                     onChange={(event) => setKeys(event.target.value)}
                     placeholder={keyListPlaceholder}
                     rows={14}
                   />
                 </label>
-                {keys.trim() && (
-                  <div className="upload-key-count">{t('可上传 {{count}} 条', { count: parsedKeys.length })}</div>
-                )}
               </>
-            ) : (
+            )}
+
+            {mode === 'single' && (
               <>
                 <div className="upload-single-key-info">
                   <Info size={15} />
@@ -2505,7 +3215,18 @@ function UploadView({ userId }: { userId: number }) {
                 )}
               </>
             )}
-          </div>
+          </section>
+
+          <footer className="upload-submit-bar">
+            <button
+              className="primary-button upload-submit-button"
+              disabled={submitting || !parsedKeys.length || (mode === 'single' && category === 'aws_a' && !baseUrl.trim())}
+              type="submit"
+            >
+              {submitting ? <Loader2 className="spin" size={17} /> : <UploadCloud size={17} />}
+              {standby ? t('入库存') : mode === 'batch' ? t('批量提交') : t('提交密钥')}
+            </button>
+          </footer>
         </form>
 
         {results.length > 0 && (
@@ -2527,7 +3248,7 @@ function UploadView({ userId }: { userId: number }) {
 
 function MyChannelsView() {
   const { language, t } = useLanguage();
-  const [viewMode, setViewMode] = useState<'group' | 'list'>('group');
+  const [viewMode, setViewMode] = useState<'group' | 'list'>('list');
   const [items, setItems] = useState<ChannelItem[]>([]);
   const [groups, setGroups] = useState<ChannelGroupSummary[]>([]);
   const [summary, setSummary] = useState<ChannelSummary>({ count: 0, total_quota: 0 });
@@ -2651,8 +3372,8 @@ function MyChannelsView() {
     setNotice(null);
   }
 
-  function updateDateRange(part: 'from' | 'to', value: string) {
-    setDateRange((current) => ({ ...current, [part]: value }));
+  function updateDateRange(nextRange: AppDateRange) {
+    setDateRange({ from: nextRange.start, to: nextRange.end });
     setGroupPage(1);
     setListPage(1);
   }
@@ -2973,48 +3694,60 @@ function MyChannelsView() {
           </button>
         </div>
         <span className="my-channel-filter-label">{t('筛选:')}</span>
-        <label className="my-channel-date-range">
-          <span className="my-channel-date-field">
-            <input
-              aria-label={t('创建起')}
-              className={dateRange.from ? '' : 'empty'}
-              max={dateRange.to || undefined}
-              onChange={(event) => updateDateRange('from', event.target.value)}
-              type="date"
-              value={dateRange.from}
-            />
-            {!dateRange.from && <span className="my-channel-date-placeholder">{t('创建起')}</span>}
-          </span>
-          <span className="my-channel-date-separator">→</span>
-          <span className="my-channel-date-field">
-            <input
-              aria-label={t('创建止')}
-              className={dateRange.to ? '' : 'empty'}
-              min={dateRange.from || undefined}
-              onChange={(event) => updateDateRange('to', event.target.value)}
-              type="date"
-              value={dateRange.to}
-            />
-            {!dateRange.to && <span className="my-channel-date-placeholder">{t('创建止')}</span>}
-          </span>
-          <CalendarDays className="my-channel-date-icon" size={14} />
-        </label>
+        <AppDateRangePicker
+          align="start"
+          clearable
+          endPlaceholder={t('创建止')}
+          onChange={updateDateRange}
+          startPlaceholder={t('创建起')}
+          value={{ start: dateRange.from, end: dateRange.to }}
+        />
         {viewMode === 'list' && (
           <>
-            <select value={status} onChange={(event) => { setStatus(event.target.value); setListPage(1); }}>
-            <option value="">{t('全部状态')}</option>
-            <option value="1">{t('启用')}</option>
-            <option value="2">{t('禁用')}</option>
-            <option value="3">{t('自动禁用')}</option>
-          </select>
-            <select value={tag} onChange={(event) => { setTag(event.target.value); setListPage(1); }}>
-            <option value="">{t('全部标签')}</option>
-            {tags.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
+            <Select
+              value={status || ALL_CHANNEL_FILTER_VALUE}
+              onValueChange={(value) => {
+                setStatus(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
+                setListPage(1);
+              }}
+            >
+              <SelectTrigger aria-label={t('状态')} className="my-channel-filter-select">
+                <SelectValue>
+                  {status === '1'
+                    ? t('启用')
+                    : status === '2'
+                      ? t('禁用')
+                      : status === '3'
+                        ? t('自动禁用')
+                        : t('全部状态')}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectContent align="start" alignItemWithTrigger={false} className="my-channel-filter-select-content">
+                <SelectItem value={ALL_CHANNEL_FILTER_VALUE}>{t('全部状态')}</SelectItem>
+                <SelectItem value="1">{t('启用')}</SelectItem>
+                <SelectItem value="2">{t('禁用')}</SelectItem>
+                <SelectItem value="3">{t('自动禁用')}</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select
+              value={tag || ALL_CHANNEL_FILTER_VALUE}
+              onValueChange={(value) => {
+                setTag(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
+                setListPage(1);
+              }}
+            >
+              <SelectTrigger aria-label={t('标签')} className="my-channel-filter-select my-channel-tag-filter-select">
+                <SelectValue>{tag || t('全部标签')}</SelectValue>
+              </SelectTrigger>
+              <SelectContent align="start" alignItemWithTrigger={false} className="my-channel-filter-select-content my-channel-tag-filter-content">
+                <SelectItem value={ALL_CHANNEL_FILTER_VALUE}>{t('全部标签')}</SelectItem>
+                {tags.map((item) => (
+                  <SelectItem key={item} value={item}>
+                    {item}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
             <div className="search-box my-channel-search-box">
               <Search size={15} />
               <input
@@ -3782,11 +4515,9 @@ function DailyStatsView() {
   const [error, setError] = useState('');
   const [expandedDates, setExpandedDates] = useState<string[]>([]);
   const [range, setRange] = useState(() => {
-    const end = new Date();
-    const start = new Date();
-    start.setDate(end.getDate() - 6);
-    const format = (date: Date) => date.toISOString().slice(0, 10);
-    return { start: format(start), end: format(end) };
+    const end = parseDateInputValue(beijingDayKey()) || new Date();
+    const start = new Date(end.getTime() - 6 * 24 * 60 * 60 * 1_000);
+    return { start: formatDateInputValue(start), end: formatDateInputValue(end) };
   });
 
   const loading = loadingKind !== null;
@@ -3843,23 +4574,7 @@ function DailyStatsView() {
       <div className="daily-stats-toolbar">
         <h1>{t('每日消费快照')}</h1>
         <div className="daily-stats-actions">
-          <label className="daily-date-range">
-            <input
-              aria-label={t('开始日期')}
-              max={range.end}
-              onChange={(event) => setRange((current) => ({ ...current, start: event.target.value }))}
-              type="date"
-              value={range.start}
-            />
-            <span>→</span>
-            <input
-              aria-label={t('结束日期')}
-              min={range.start}
-              onChange={(event) => setRange((current) => ({ ...current, end: event.target.value }))}
-              type="date"
-              value={range.end}
-            />
-          </label>
+          <AppDateRangePicker onChange={setRange} value={range} />
           <button
             className={`daily-refresh-button ${loadingKind === 'refresh' ? 'is-loading' : ''}`}
             disabled={loading}
@@ -3979,25 +4694,409 @@ function DailyStatsView() {
   );
 }
 
-function ModelGapsView() {
+function UserMappingDialog({
+  mapping,
+  onClose,
+  onSaved,
+}: {
+  mapping: UserMapping | null;
+  onClose: () => void;
+  onSaved: () => Promise<void>;
+}) {
   const { t } = useLanguage();
-  const [items, setItems] = useState<ModelGap[]>([]);
+  const editing = mapping !== null;
+  const [publicUsername, setPublicUsername] = useState(mapping?.public_username || '');
+  const [upstreamUsername, setUpstreamUsername] = useState(mapping?.upstream_username || '');
+  const [displayName, setDisplayName] = useState(mapping?.display_name || '');
+  const [accountKind, setAccountKind] = useState<AccountKind>(
+    mapping?.account_kind === 'sub' ? 'sub' : 'primary',
+  );
+  const [upstreamUserId, setUpstreamUserId] = useState(
+    mapping?.upstream_user_id?.toString() || '',
+  );
+  const [active, setActive] = useState(mapping?.active ?? true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving) return;
+    const nextPublicUsername = publicUsername.trim();
+    const nextUpstreamUsername = upstreamUsername.trim();
+    const nextDisplayName = displayName.trim();
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(nextPublicUsername)) {
+      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
+      return;
+    }
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(nextUpstreamUsername)) {
+      setError(t('GYS用户名须为3至64位字母、数字、点、横线或下划线'));
+      return;
+    }
+    if (!nextDisplayName || nextDisplayName.length > 128) {
+      setError(t('请输入有效的显示名'));
+      return;
+    }
+    const nextUpstreamUserId = Number(upstreamUserId.trim());
+    if (
+      accountKind === 'sub'
+      && (!/^[1-9]\d*$/.test(upstreamUserId.trim()) || !Number.isSafeInteger(nextUpstreamUserId))
+    ) {
+      setError(t('子账号 ID 必须为正整数'));
+      return;
+    }
+
+    setSaving(true);
+    setError('');
+    try {
+      await api(
+        editing
+          ? `/api/user-mappings/${encodeURIComponent(mapping.public_username)}`
+          : '/api/user-mappings',
+        {
+          method: editing ? 'PUT' : 'POST',
+          body: {
+            public_username: nextPublicUsername,
+            upstream_username: nextUpstreamUsername,
+            display_name: nextDisplayName,
+            account_kind: accountKind,
+            upstream_user_id: accountKind === 'sub' ? nextUpstreamUserId : null,
+            ...(editing ? { active } : {}),
+          },
+        },
+      );
+      await onSaved();
+    } catch (failure) {
+      setError(failure instanceof Error
+        ? failure.message
+        : t(editing ? '更新用户映射失败' : '创建用户映射失败'));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Dialog
+      disablePointerDismissal={saving}
+      onOpenChange={(nextOpen, eventDetails) => {
+        if (!nextOpen && saving) {
+          eventDetails.cancel();
+          return;
+        }
+        if (!nextOpen) onClose();
+      }}
+      open
+    >
+      <DialogContent className="account-dialog user-mapping-dialog" showCloseButton={false}>
+        <div className="account-dialog-header user-mapping-dialog-header">
+          <div className="user-mapping-dialog-heading">
+            <span aria-hidden="true" className="user-mapping-dialog-icon">
+              <Users size={19} />
+            </span>
+            <DialogHeader>
+              <DialogTitle>{t(editing ? '编辑用户映射' : '新增用户映射')}</DialogTitle>
+              <DialogDescription>
+                {t('管理本站用户名与 GYS 用户名的映射关系。')}
+              </DialogDescription>
+            </DialogHeader>
+          </div>
+          <DialogClose aria-label={t('关闭')} disabled={saving} type="button">
+            <X size={18} />
+          </DialogClose>
+        </div>
+        <form aria-busy={saving} className="user-mapping-dialog-form" onSubmit={submit}>
+          <div className="user-mapping-dialog-body">
+            <div className="user-mapping-field">
+              <span>{t('账号类型')}</span>
+              <Select
+                disabled={saving}
+                onValueChange={value => {
+                  if (value === 'primary' || value === 'sub') {
+                    setAccountKind(value);
+                    if (value === 'primary') setUpstreamUserId('');
+                  }
+                }}
+                value={accountKind}
+              >
+                <SelectTrigger aria-label={t('账号类型')} className="user-mapping-select">
+                  <SelectValue>{t(accountKind === 'sub' ? '子账号' : '主账号')}</SelectValue>
+                </SelectTrigger>
+                <SelectContent align="start" alignItemWithTrigger={false}>
+                  <SelectItem value="primary">{t('主账号')}</SelectItem>
+                  <SelectItem value="sub">{t('子账号')}</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {accountKind === 'sub' && (
+              <label className="user-mapping-field">
+                <span>{t('子账号 ID')}</span>
+                <input
+                  autoComplete="off"
+                  disabled={saving}
+                  inputMode="numeric"
+                  min={1}
+                  onChange={event => setUpstreamUserId(event.target.value)}
+                  placeholder={t('上游用户 ID')}
+                  required
+                  step={1}
+                  type="number"
+                  value={upstreamUserId}
+                />
+              </label>
+            )}
+            <label className="user-mapping-field">
+              <span>{t('本站用户名')}</span>
+              <input
+                autoComplete="off"
+                autoFocus
+                disabled={saving}
+                maxLength={64}
+                minLength={3}
+                onChange={event => setPublicUsername(event.target.value)}
+                pattern="[A-Za-z0-9_.-]{3,64}"
+                placeholder={t('本站登录用户名')}
+                required
+                value={publicUsername}
+              />
+            </label>
+            <label className="user-mapping-field">
+              <span>{t('GYS用户名')}</span>
+              <input
+                autoComplete="off"
+                disabled={saving}
+                maxLength={64}
+                minLength={3}
+                onChange={event => setUpstreamUsername(event.target.value)}
+                pattern="[A-Za-z0-9_.-]{3,64}"
+                placeholder={t('GYS登录用户名')}
+                required
+                value={upstreamUsername}
+              />
+            </label>
+            <label className="user-mapping-field">
+              <span>{t('显示名')}</span>
+              <input
+                autoComplete="off"
+                disabled={saving}
+                maxLength={128}
+                onChange={event => setDisplayName(event.target.value)}
+                placeholder={t('显示名称')}
+                required
+                value={displayName}
+              />
+            </label>
+            {editing && (
+              <div className="user-mapping-status-row">
+                <div>
+                  <strong id="user-mapping-active-label">{t('启用映射')}</strong>
+                  <span id="user-mapping-active-description">{t('启用后，用户可以使用本站用户名登录。')}</span>
+                </div>
+                <Switch
+                  aria-describedby="user-mapping-active-description"
+                  aria-labelledby="user-mapping-active-label"
+                  checked={active}
+                  disabled={saving}
+                  onCheckedChange={nextActive => setActive(nextActive)}
+                />
+              </div>
+            )}
+            {error && <p className="account-dialog-error" role="alert">{error}</p>}
+          </div>
+          <div className="account-dialog-actions user-mapping-dialog-actions">
+            <button className="ghost-button" disabled={saving} onClick={onClose} type="button">
+              {t('取消')}
+            </button>
+            <button className="primary-button compact" disabled={saving} type="submit">
+              {saving && <Loader2 className="spin" size={16} />}
+              {t(saving ? '保存中...' : '保存映射')}
+            </button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function UserMappingsView() {
+  const { language, t } = useLanguage();
+  const [items, setItems] = useState<UserMapping[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [editingMapping, setEditingMapping] = useState<UserMapping | null>(null);
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
     setNotice(null);
     try {
-      setItems(await api<ModelGap[]>('/api/model-gaps', { fresh }));
-    } catch (error) {
+      const data = await api<UserMappingListResponse>('/api/user-mappings', { fresh });
+      setItems(data.items || []);
+    } catch (failure) {
       setNotice({
         type: 'error',
-        text: error instanceof Error ? error.message : t('加载模型缺口失败'),
+        text: failure instanceof Error ? failure.message : t('加载用户映射失败'),
       });
     } finally {
       setLoading(false);
     }
+  }, [t]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  async function handleCreated() {
+    setCreateOpen(false);
+    await load(true);
+    setNotice({ type: 'ok', text: t('用户映射创建成功') });
+  }
+
+  async function handleUpdated() {
+    setEditingMapping(null);
+    await load(true);
+    setNotice({ type: 'ok', text: t('用户映射更新成功') });
+  }
+
+  return (
+    <section className="user-mappings-page">
+      <PageHeading
+        action={(
+          <div className="action-row">
+            <button className="ghost-button compact" onClick={() => void load(true)} type="button">
+              <RefreshCcw size={17} />
+              {t('刷新')}
+            </button>
+            <button className="primary-button compact" onClick={() => setCreateOpen(true)} type="button">
+              <Plus size={17} />
+              {t('新增映射')}
+            </button>
+          </div>
+        )}
+        icon={Users}
+        subtitle={t('管理本站用户名与 GYS 用户名的映射关系。')}
+        title={t('用户映射')}
+      />
+      <NoticeBanner notice={notice} />
+      <div className="panel user-mappings-panel">
+        {loading ? (
+          <div className="loading-block">
+            <Loader2 className="spin" />
+            {t('正在加载用户映射')}
+          </div>
+        ) : items.length ? (
+          <div className="table-wrap">
+            <table className="user-mappings-table">
+              <thead>
+                <tr>
+                  <th>ID</th>
+                  <th>{t('本站用户名')}</th>
+                  <th>{t('GYS用户名')}</th>
+                  <th>{t('显示名')}</th>
+                  <th>{t('账号类型')}</th>
+                  <th>{t('状态')}</th>
+                  <th>{t('更新时间')}</th>
+                  <th>{t('操作')}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map(item => (
+                  <tr key={item.public_username}>
+                    <td><code className="user-mapping-user-id">{item.upstream_user_id ?? '-'}</code></td>
+                    <td><strong>{item.public_username}</strong></td>
+                    <td><code>{item.upstream_username}</code></td>
+                    <td>{item.display_name || '-'}</td>
+                    <td>
+                      <Badge tone={item.account_kind === 'primary' ? 'blue' : item.account_kind === 'sub' ? 'purple' : 'neutral'}>
+                        {item.account_kind === 'primary'
+                          ? t('主账号')
+                          : item.account_kind === 'sub'
+                            ? t('子账号')
+                            : item.account_kind}
+                      </Badge>
+                    </td>
+                    <td><Badge tone={item.active ? 'green' : 'red'}>{t(item.active ? '启用' : '停用')}</Badge></td>
+                    <td>{formatBeijingDateTime(item.updated_at, language)}</td>
+                    <td>
+                      <button
+                        aria-label={t('编辑 {{name}}', { name: item.public_username })}
+                        className="user-mapping-edit-button"
+                        onClick={() => setEditingMapping(item)}
+                        type="button"
+                      >
+                        <Pencil size={14} />
+                        {t('编辑')}
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState title={t('暂无用户映射')} description={t('点击“新增映射”创建第一条用户映射。')} />
+        )}
+      </div>
+      {createOpen && (
+        <UserMappingDialog mapping={null} onClose={() => setCreateOpen(false)} onSaved={handleCreated} />
+      )}
+      {editingMapping && (
+        <UserMappingDialog
+          key={editingMapping.public_username}
+          mapping={editingMapping}
+          onClose={() => setEditingMapping(null)}
+          onSaved={handleUpdated}
+        />
+      )}
+    </section>
+  );
+}
+
+function ModelGapsView() {
+  const { t } = useLanguage();
+  const [items, setItems] = useState<ModelGap[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const [copyToast, setCopyToast] = useState<Notice | null>(null);
+  const mountedRef = useRef(false);
+  const inFlightRef = useRef<Promise<void> | null>(null);
+  const requestControllerRef = useRef<AbortController | null>(null);
+
+  const load = useCallback((background = false) => {
+    if (inFlightRef.current) return inFlightRef.current;
+
+    const controller = new AbortController();
+    requestControllerRef.current = controller;
+    if (mountedRef.current) {
+      if (background) setRefreshing(true);
+      else setLoading(true);
+      setNotice(null);
+    }
+
+    const request = (async () => {
+      try {
+        const nextItems = await api<ModelGap[]>('/api/model-gaps?refresh=true', {
+          fresh: true,
+          signal: controller.signal,
+        });
+        if (mountedRef.current && !controller.signal.aborted) setItems(nextItems);
+      } catch (error) {
+        if (!mountedRef.current || controller.signal.aborted) return;
+        setNotice({
+          type: 'error',
+          text: error instanceof Error ? error.message : t('加载模型缺口失败'),
+        });
+      } finally {
+        if (requestControllerRef.current !== controller) return;
+        inFlightRef.current = null;
+        requestControllerRef.current = null;
+        if (mountedRef.current) {
+          setLoading(false);
+          setRefreshing(false);
+        }
+      }
+    })();
+    inFlightRef.current = request;
+    return request;
   }, [t]);
 
   async function copyReport() {
@@ -4009,15 +5108,39 @@ function ModelGapsView() {
       ),
     ].join('\n');
     await navigator.clipboard.writeText(report).catch(() => undefined);
-    setNotice({ type: 'ok', text: t('已复制缺口通知。') });
+    setCopyToast({ type: 'ok', text: t('已复制缺口通知。') });
   }
 
   useEffect(() => {
-    load();
+    mountedRef.current = true;
+    void load(false);
+    const timer = window.setInterval(() => {
+      void load(true);
+    }, MODEL_GAPS_REFRESH_INTERVAL_MS);
+    return () => {
+      mountedRef.current = false;
+      window.clearInterval(timer);
+      const controller = requestControllerRef.current;
+      requestControllerRef.current = null;
+      inFlightRef.current = null;
+      controller?.abort();
+    };
   }, [load]);
+
+  useEffect(() => {
+    if (!copyToast) return;
+    const timer = window.setTimeout(() => setCopyToast(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [copyToast]);
 
   return (
     <section>
+      {copyToast && (
+        <div className={`upload-toast upload-toast-${copyToast.type} model-gap-toast`} role="status">
+          <CheckCircle2 size={17} />
+          <span>{copyToast.text}</span>
+        </div>
+      )}
       <PageHeading
         icon={Zap}
         title={t('模型缺口')}
@@ -4028,8 +5151,13 @@ function ModelGapsView() {
               <ClipboardCopy size={17} />
               {t('复制通知')}
             </button>
-            <button className="primary-button compact" onClick={() => load(true)} type="button">
-              <RefreshCcw size={17} />
+            <button
+              className="primary-button compact"
+              disabled={loading || refreshing}
+              onClick={() => void load(true)}
+              type="button"
+            >
+              <RefreshCcw className={loading || refreshing ? 'spin' : undefined} size={17} />
               {t('刷新')}
             </button>
           </div>
@@ -4077,6 +5205,337 @@ function ModelGapsView() {
           <EmptyState title={t('暂无缺口')} description={t('目前没有模型缺口提醒。')} />
         )}
       </div>
+    </section>
+  );
+}
+
+function AnnouncementManagementView() {
+  const { language, t } = useLanguage();
+  const [items, setItems] = useState<AnnouncementItem[]>([]);
+  const [title, setTitle] = useState('');
+  const [content, setContent] = useState('');
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [publishError, setPublishError] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [publishing, setPublishing] = useState(false);
+  const [busyId, setBusyId] = useState<number | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<AnnouncementItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const composeTriggerRef = useRef<HTMLButtonElement>(null);
+
+  const load = useCallback(async (fresh = false) => {
+    setLoading(true);
+    setNotice(null);
+    try {
+      const data = await api<AnnouncementListResponse>('/api/announcement-management', { fresh });
+      setItems(data.items || []);
+    } catch (failure) {
+      setNotice({
+        type: 'error',
+        text: failure instanceof Error ? failure.message : t('加载公告失败'),
+      });
+    } finally {
+      setLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(
+      () => setNotice(null),
+      notice.type === 'error' ? 5_000 : 2_800,
+    );
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+
+  async function publish(event: FormEvent) {
+    event.preventDefault();
+    const nextTitle = title.trim();
+    const nextContent = content.trim();
+    if (!nextTitle || !nextContent || publishing) return;
+
+    setPublishing(true);
+    setPublishError('');
+    setNotice(null);
+    try {
+      await api<AnnouncementItem>('/api/announcement-management', {
+        method: 'POST',
+        body: { title: nextTitle, content: nextContent },
+      });
+      setTitle('');
+      setContent('');
+      await load(true);
+      closeCompose();
+      setNotice({ type: 'ok', text: t('公告发布成功') });
+      window.dispatchEvent(new Event('gys:announcements-changed'));
+    } catch (failure) {
+      setPublishError(failure instanceof Error ? failure.message : t('发布公告失败'));
+    } finally {
+      setPublishing(false);
+    }
+  }
+
+  async function togglePublished(item: AnnouncementItem) {
+    if (busyId !== null) return;
+    setBusyId(item.id);
+    setNotice(null);
+    try {
+      await api<AnnouncementItem>(`/api/announcement-management/${item.id}`, {
+        method: 'PATCH',
+        body: { published: !item.published },
+      });
+      await load(true);
+      setNotice({
+        type: 'ok',
+        text: t(item.published ? '公告已下架' : '公告已重新发布'),
+      });
+    } catch (failure) {
+      setNotice({
+        type: 'error',
+        text: failure instanceof Error ? failure.message : t('更新公告状态失败'),
+      });
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  function openDelete(item: AnnouncementItem) {
+    setDeleteError('');
+    setPendingDelete(item);
+  }
+
+  function closeCompose() {
+    setPublishError('');
+    setComposeOpen(false);
+    window.setTimeout(() => composeTriggerRef.current?.focus(), 0);
+  }
+
+  async function removeAnnouncement() {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await api(`/api/announcement-management/${pendingDelete.id}`, { method: 'DELETE' });
+      setPendingDelete(null);
+      await load(true);
+      setNotice({ type: 'ok', text: t('公告已删除') });
+    } catch (failure) {
+      setDeleteError(failure instanceof Error ? failure.message : t('删除公告失败'));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <section className="announcement-management-page">
+      {notice && (
+        <div
+          className={`upload-toast upload-toast-${notice.type} announcement-management-toast`}
+          role={notice.type === 'error' ? 'alert' : 'status'}
+        >
+          {notice.type === 'ok' ? (
+            <CheckCircle2 size={17} />
+          ) : notice.type === 'error' ? (
+            <XCircle size={17} />
+          ) : (
+            <AlertTriangle size={17} />
+          )}
+          <span>{notice.text}</span>
+        </div>
+      )}
+      <PageHeading
+        icon={Megaphone}
+        title={t('公告管理')}
+        subtitle={t('发布和管理站内公告。')}
+        action={
+          <div className="announcement-heading-actions">
+            <button className="ghost-button compact" disabled={loading} onClick={() => load(true)} type="button">
+              <RefreshCcw className={loading ? 'spin' : ''} size={17} />
+              {t('刷新')}
+            </button>
+            <button
+              className="primary-button compact"
+              onClick={() => {
+                setPublishError('');
+                setComposeOpen(true);
+              }}
+              ref={composeTriggerRef}
+              type="button"
+            >
+              <Plus size={16} />
+              {t('添加公告')}
+            </button>
+          </div>
+        }
+      />
+      <section className="panel announcement-list-panel">
+        <div className="panel-title">
+          <h2>{t('管理现有公告')}</h2>
+          {!loading && <Badge tone="blue">{items.length}</Badge>}
+        </div>
+        {loading ? (
+          <div className="loading-block announcement-management-loading">
+            <Loader2 className="spin" />
+            {t('正在加载公告')}
+          </div>
+        ) : items.length ? (
+          <div className="announcement-management-list">
+            {items.map(item => (
+              <article className="announcement-management-item" key={item.id}>
+                <header>
+                  <h3>{item.title}</h3>
+                  <Badge tone={item.published ? 'green' : 'neutral'}>
+                    {t(item.published ? '已发布' : '已下架')}
+                  </Badge>
+                </header>
+                <p>{item.content}</p>
+                <footer>
+                  <div className="announcement-management-actions">
+                    <button
+                      className="ghost-button compact"
+                      disabled={busyId !== null}
+                      onClick={() => togglePublished(item)}
+                      type="button"
+                    >
+                      {busyId === item.id ? (
+                        <Loader2 className="spin" size={15} />
+                      ) : item.published ? (
+                        <EyeOff size={15} />
+                      ) : (
+                        <Eye size={15} />
+                      )}
+                      {t(item.published ? '下架' : '重新发布')}
+                    </button>
+                    <button
+                      className="danger-button compact"
+                      disabled={busyId !== null}
+                      onClick={() => openDelete(item)}
+                      type="button"
+                    >
+                      <Trash2 size={15} />{t('删除')}
+                    </button>
+                  </div>
+                </footer>
+              </article>
+            ))}
+          </div>
+        ) : (
+          <EmptyState
+            title={t('暂无公告记录')}
+            description={t('发布第一条公告后会显示在这里。')}
+          />
+        )}
+      </section>
+
+      <Dialog
+        onOpenChange={nextOpen => {
+          if (publishing && !nextOpen) return;
+          setComposeOpen(nextOpen);
+          if (!nextOpen) {
+            setPublishError('');
+            window.setTimeout(() => composeTriggerRef.current?.focus(), 0);
+          }
+        }}
+        open={composeOpen}
+      >
+        <DialogContent className="announcement-compose-dialog" showCloseButton={false}>
+          <div className="announcement-compose-dialog-header">
+            <DialogHeader>
+              <DialogTitle>{t('添加公告')}</DialogTitle>
+              <DialogDescription>{t('填写公告内容，发布后会显示在顶部通知中。')}</DialogDescription>
+            </DialogHeader>
+            <DialogClose aria-label={t('关闭')} className="announcement-compose-close" disabled={publishing}>
+              <X size={18} />
+            </DialogClose>
+          </div>
+          <form aria-busy={publishing} className="announcement-compose-form" onSubmit={publish}>
+            <label>
+              <span className="announcement-field-heading">
+                <span>{t('公告标题')}</span>
+                <small>{title.length}/120 {t('字符')}</small>
+              </span>
+              <input
+                autoFocus
+                maxLength={120}
+                onChange={event => setTitle(event.target.value)}
+                placeholder={t('请输入公告标题')}
+                required
+                value={title}
+              />
+            </label>
+            <label>
+              <span className="announcement-field-heading">
+                <span>{t('公告内容')}</span>
+                <small>{content.length}/5000 {t('字符')}</small>
+              </span>
+              <textarea
+                maxLength={5000}
+                onChange={event => setContent(event.target.value)}
+                placeholder={t('请输入公告内容')}
+                required
+                rows={9}
+                value={content}
+              />
+            </label>
+            {publishError && <p className="announcement-publish-error" role="alert">{publishError}</p>}
+            <div className="announcement-compose-actions">
+              <button
+                className="ghost-button compact"
+                disabled={publishing}
+                onClick={closeCompose}
+                type="button"
+              >
+                {t('取消')}
+              </button>
+              <button
+                className="primary-button compact announcement-publish-button"
+                disabled={publishing || !title.trim() || !content.trim()}
+                type="submit"
+              >
+                {publishing ? <Loader2 className="spin" size={16} /> : <Megaphone size={16} />}
+                {t(publishing ? '发布中...' : '发布公告')}
+              </button>
+            </div>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        onOpenChange={nextOpen => {
+          if (!nextOpen && !deleting) {
+            setPendingDelete(null);
+            setDeleteError('');
+          }
+        }}
+        open={Boolean(pendingDelete)}
+      >
+        <DialogContent className="announcement-delete-dialog" showCloseButton={false}>
+          <DialogHeader>
+            <DialogTitle>{t('删除公告')}</DialogTitle>
+            <DialogDescription>
+              {pendingDelete
+                ? t('确定删除公告“{{title}}”吗？删除后无法恢复。', { title: pendingDelete.title })
+                : ''}
+            </DialogDescription>
+          </DialogHeader>
+          {deleteError && <p className="account-dialog-error" role="alert">{deleteError}</p>}
+          <div className="announcement-delete-actions">
+            <button className="ghost-button compact" disabled={deleting} onClick={() => setPendingDelete(null)} type="button">
+              {t('取消')}
+            </button>
+            <button className="danger-button compact solid" disabled={deleting} onClick={removeAnnouncement} type="button">
+              {deleting && <Loader2 className="spin" size={15} />}
+              {t(deleting ? '正在删除...' : '删除')}
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
     </section>
   );
 }
@@ -4708,7 +6167,6 @@ function CreateSubAccountDialog({
   onCreated: () => Promise<void>;
 }) {
   const { t } = useLanguage();
-  const [username, setUsername] = useState('');
   const [gysUsername, setGysUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
@@ -4718,17 +6176,8 @@ function CreateSubAccountDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const cleanUsername = username.trim();
     const cleanGysUsername = gysUsername.trim();
     const cleanDisplayName = displayName.trim();
-    if (!cleanUsername) {
-      setError(t('请输入用户名'));
-      return;
-    }
-    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
-      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
-      return;
-    }
     if (!cleanGysUsername) {
       setError(t('请输入GYS用户名'));
       return;
@@ -4751,7 +6200,6 @@ function CreateSubAccountDialog({
       await api('/api/sub-accounts', {
         method: 'POST',
         body: {
-          username: cleanUsername,
           gys_username: cleanGysUsername,
           display_name: cleanDisplayName,
           password,
@@ -4787,23 +6235,10 @@ function CreateSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('本站用户名')}</span>
-            <input
-              autoComplete="off"
-              autoFocus
-              maxLength={64}
-              minLength={3}
-              onChange={event => setUsername(event.target.value)}
-              pattern="[A-Za-z0-9_.-]{3,64}"
-              placeholder={t('本站登录用户名')}
-              required
-              value={username}
-            />
-          </label>
-          <label>
             <span>{t('GYS用户名')}</span>
             <input
               autoComplete="off"
+              autoFocus
               maxLength={64}
               minLength={3}
               onChange={event => setGysUsername(event.target.value)}
@@ -4872,8 +6307,8 @@ function EditSubAccountDialog({
   onUpdated: () => Promise<void>;
 }) {
   const { t } = useLanguage();
-  const [username, setUsername] = useState(account.username);
-  const [displayName, setDisplayName] = useState(account.display_name || account.username);
+  const upstreamUsername = subAccountUpstreamUsername(account);
+  const [displayName, setDisplayName] = useState(account.display_name || upstreamUsername);
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [enabled, setEnabled] = useState(account.status === 1);
@@ -4882,12 +6317,7 @@ function EditSubAccountDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const cleanUsername = username.trim();
     const cleanDisplayName = displayName.trim();
-    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
-      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
-      return;
-    }
     if (!cleanDisplayName) {
       setError(t('请输入显示名'));
       return;
@@ -4902,7 +6332,6 @@ function EditSubAccountDialog({
       await api(`/api/sub-accounts/${account.id}`, {
         method: 'PUT',
         body: {
-          username: cleanUsername,
           display_name: cleanDisplayName,
           status: enabled ? 1 : 0,
           ...(password ? { password } : {}),
@@ -4931,20 +6360,8 @@ function EditSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('本站用户名')}</span>
-            <input
-              autoComplete="off"
-              maxLength={64}
-              minLength={3}
-              onChange={event => setUsername(event.target.value)}
-              pattern="[A-Za-z0-9_.-]{3,64}"
-              required
-              value={username}
-            />
-          </label>
-          <label>
             <span>{t('GYS用户名')}</span>
-            <input disabled value={account.original_username || '-'} />
+            <input disabled value={upstreamUsername || '-'} />
           </label>
           <label>
             <span>{t('显示名')}</span>
@@ -5037,8 +6454,8 @@ function DeleteSubAccountDialog({
         <div className="channel-confirm-body">
           <p>{t('确定删除子账号“{{name}}”吗？删除后无法恢复。', { name: account.display_name || account.username })}</p>
           <div className="channel-confirm-target">
-            <span>{t('本站用户名')}</span>
-            <strong>{account.username}</strong>
+            <span>{t('GYS用户名')}</span>
+            <strong>{subAccountUpstreamUsername(account)}</strong>
             <code>ID {account.id}</code>
           </div>
           {error && <p className="account-dialog-error" role="alert">{error}</p>}
@@ -5090,7 +6507,10 @@ function SubAccountsView() {
   async function handleCreated() {
     setCreateOpen(false);
     await load(true);
-    setNotice({ type: 'ok', text: t('子账号创建成功') });
+    setNotice({
+      type: 'ok',
+      text: t('子账号创建成功；需由超级管理员创建并启用映射后才能登录。'),
+    });
   }
 
   async function handleUpdated() {
@@ -5152,11 +6572,15 @@ function SubAccountsView() {
                 </tr>
               </thead>
               <tbody>
-                {items.map((item) => (
+                {items.map((item) => {
+                  const publicUsername = subAccountPublicUsername(item);
+                  const upstreamUsername = subAccountUpstreamUsername(item);
+                  const accountName = item.display_name || publicUsername || upstreamUsername;
+                  return (
                   <tr key={item.id}>
                     <td>{item.id}</td>
-                    <td>{item.username}</td>
-                    <td>{item.original_username || '-'}</td>
+                    <td>{publicUsername || <Badge>{t('未映射')}</Badge>}</td>
+                    <td>{upstreamUsername || '-'}</td>
                     <td>{item.display_name || '-'}</td>
                     <td>{item.channel_count || 0}</td>
                     <td>{formatQuota(item.used_quota)}</td>
@@ -5165,25 +6589,26 @@ function SubAccountsView() {
                     </td>
                     <td>
                       <div className="sub-account-row-actions">
-                        <button aria-label={t('查看 {{name}} 的消耗', { name: item.username })} onClick={() => setUsageAccount(item)} type="button">
+                        <button aria-label={t('查看 {{name}} 的消耗', { name: accountName })} onClick={() => setUsageAccount(item)} type="button">
                           <BarChart3 size={14} />{t('查看消耗')}
                         </button>
-                        <button aria-label={t('为 {{name}} 结算', { name: item.username })} onClick={() => setSettlementAccount(item)} type="button">
+                        <button aria-label={t('为 {{name}} 结算', { name: accountName })} onClick={() => setSettlementAccount(item)} type="button">
                           <CheckCircle2 size={14} />{t('结算')}
                         </button>
-                        <button aria-label={t('为 {{name}} 设置汇率', { name: item.username })} onClick={() => setRateAccount(item)} type="button">
+                        <button aria-label={t('为 {{name}} 设置汇率', { name: accountName })} onClick={() => setRateAccount(item)} type="button">
                           <CircleDollarSign size={14} />{t('设置汇率')}
                         </button>
-                        <button aria-label={t('编辑 {{name}}', { name: item.username })} onClick={() => setEditingAccount(item)} type="button">
+                        <button aria-label={t('编辑 {{name}}', { name: accountName })} onClick={() => setEditingAccount(item)} type="button">
                           <Pencil size={14} />{t('编辑')}
                         </button>
-                        <button aria-label={t('删除 {{name}}', { name: item.username })} className="danger" onClick={() => setDeletingAccount(item)} type="button">
+                        <button aria-label={t('删除 {{name}}', { name: accountName })} className="danger" onClick={() => setDeletingAccount(item)} type="button">
                           <Trash2 size={14} />{t('删除')}
                         </button>
                       </div>
                     </td>
                   </tr>
-                ))}
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -5217,19 +6642,23 @@ function SubAccountsView() {
 function ViewRenderer({
   view,
   setView,
-  userId,
+  user,
 }: {
   view: ViewKey;
   setView: (view: ViewKey) => void;
-  userId: number;
+  user: UserProfile;
 }) {
-  if (view === 'upload') return <UploadView userId={userId} />;
+  if (!canAccessView(user, view)) return null;
+  if (view === 'dashboard') return <DashboardView setView={setView} />;
+  if (view === 'upload') return <UploadView userId={user.user_id} />;
   if (view === 'my-channels') return <MyChannelsView />;
   if (view === 'api-access') return <ApiAccessView />;
   if (view === 'sub-accounts') return <SubAccountsView />;
   if (view === 'daily-stats') return <DailyStatsView />;
   if (view === 'model-gaps') return <ModelGapsView />;
-  return <DashboardView setView={setView} />;
+  if (view === 'announcements') return <AnnouncementManagementView />;
+  if (view === 'user-mappings') return <UserMappingsView />;
+  return null;
 }
 
 function SupplierApplication() {
@@ -5240,6 +6669,7 @@ function SupplierApplication() {
   const [isLoggingOut, setIsLoggingOut] = useState(false);
   const [authError, setAuthError] = useState(false);
   const [authAttempt, setAuthAttempt] = useState(0);
+  const [profileVerified, setProfileVerified] = useState(false);
   const authVersionRef = useRef(0);
 
   function resetSession() {
@@ -5250,6 +6680,7 @@ function SupplierApplication() {
     pendingApiRequests.clear();
     authRedirectPending = false;
     setAuthError(false);
+    setProfileVerified(false);
   }
 
   useEffect(() => {
@@ -5264,28 +6695,25 @@ function SupplierApplication() {
     const version = authVersionRef.current;
     const isCurrent = () => !controller.signal.aborted && version === authVersionRef.current;
     setAuthError(false);
+    setProfileVerified(false);
+    setAuthLoading(true);
     const cachedUser = readCachedUser();
-    if (cachedUser) {
-      setUser(cachedUser);
-      setAuthLoading(false);
-    } else {
-      setAuthLoading(true);
-    }
+    setUser(cachedUser);
 
-    api<UserProfile>('/api/auth/profile', { fresh: true, signal: controller.signal })
-      .then((nextUser) => {
+    api<unknown>('/api/auth/profile', { fresh: true, signal: controller.signal })
+      .then((profileValue) => {
         if (!isCurrent()) return;
-        if (!nextUser || typeof nextUser.username !== 'string' || !nextUser.username) {
-          throw new Error('Invalid profile response');
-        }
+        const nextUser = requireUserProfile(profileValue);
         cacheUser(nextUser);
         setUser(nextUser);
+        setProfileVerified(true);
       })
       .catch((error) => {
         if (!isCurrent() || authRedirectPending) return;
+        setProfileVerified(false);
+        setUser(null);
         if (error instanceof SessionExpiredError) {
           clearCachedUser();
-          setUser(null);
         } else {
           setAuthError(true);
         }
@@ -5296,6 +6724,15 @@ function SupplierApplication() {
     return () => controller.abort();
   }, [authAttempt]);
 
+  useEffect(() => {
+    if (!user || !profileVerified) return;
+    const nextView = canAccessView(user, activeView) ? activeView : defaultViewForUser(user);
+    if (nextView !== activeView) setActiveView(nextView);
+    if (window.location.pathname !== `/${nextView}`) {
+      window.history.replaceState({}, '', `/${nextView}`);
+    }
+  }, [activeView, profileVerified, user]);
+
   async function logout() {
     if (isLoggingOut) return;
 
@@ -5305,6 +6742,7 @@ function SupplierApplication() {
       await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
       clearCachedUser();
       setUser(null);
+      setProfileVerified(false);
       setAuthLoading(false);
       window.history.pushState({}, '', '/login');
     } finally {
@@ -5321,7 +6759,7 @@ function SupplierApplication() {
     );
   }
 
-  if (!user) {
+  if (!user || !profileVerified) {
     if (authError) {
       return (
         <main className="loading-screen" role="alert">
@@ -5339,17 +6777,21 @@ function SupplierApplication() {
           resetSession();
           cacheUser(nextUser);
           setUser(nextUser);
-          setActiveView('dashboard');
-          window.history.pushState({}, '', '/dashboard');
+          setProfileVerified(true);
+          const nextView = defaultViewForUser(nextUser);
+          setActiveView(nextView);
+          window.history.pushState({}, '', `/${nextView}`);
         }}
       />
     );
   }
 
+  const effectiveView = canAccessView(user, activeView) ? activeView : defaultViewForUser(user);
+
   return (
     <Shell
       user={user}
-      activeView={activeView}
+      activeView={effectiveView}
       setActiveView={setActiveView}
       onLogout={logout}
       isLoggingOut={isLoggingOut}
@@ -5364,9 +6806,10 @@ function SupplierApplication() {
         </div>
       )}
       <ViewRenderer
-        view={activeView}
-        userId={Number(user.user_id || user.id)}
+        view={effectiveView}
+        user={user}
         setView={(view) => {
+          if (!canAccessView(user, view)) return;
           setActiveView(view);
           window.history.pushState({}, '', `/${view}`);
         }}

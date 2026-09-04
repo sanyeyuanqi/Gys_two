@@ -38,6 +38,7 @@ services:
     environment:
       DATABASE_URL: postgresql://gys:${POSTGRES_PASSWORD}@gys-postgres:5432/gys
       GYS_PUBLIC_ORIGIN: ${GYS_PUBLIC_ORIGIN:-https://gys.oljvxj.xyz}
+      SUPER_ADMIN_INITIAL_PASSWORD: ${SUPER_ADMIN_INITIAL_PASSWORD:?SUPER_ADMIN_INITIAL_PASSWORD is required}
       TZ: Asia/Shanghai
     expose:
       - "8000"

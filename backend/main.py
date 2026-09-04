@@ -31,10 +31,12 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 UPSTREAM_ORIGIN = "https://gys.oljuxj.xyz"
 COOKIE_NAME = "key_system_session"
 DAY_MS = 86_400_000
-DEFAULT_ACCOUNT_ALIASES = (
-    ("sanyeyuanqi", "hhxxzz4", "sanyeyuanqi"),
-    ("okoko", "okoko", "okoko"),
-)
+MODEL_GAPS_CACHE_KEY = "model-gaps:v1"
+MODEL_GAPS_CACHE_TTL_MS = 3 * 60_000
+MODEL_GAPS_REFRESH_LEASE_MS = 75_000
+SUPER_ADMIN_USERNAME = "sanyeAdmin"
+SUPER_ADMIN_ROLE = "super_admin"
+LOCAL_AUTH_SOURCE = "local"
 GYS_TIMEZONE = ZoneInfo("Asia/Shanghai")
 CHANNEL_USAGE_CATEGORIES = (
     "aws",
@@ -81,6 +83,26 @@ def decimal_text(value: Decimal) -> str:
 
 
 DbRow = dict[str, Any]
+
+
+def hash_local_password(password: str, iterations: int = 600_000) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return f"pbkdf2_sha256${iterations}${salt.hex()}${digest.hex()}"
+
+
+def verify_local_password(password: str, encoded: str) -> bool:
+    try:
+        scheme, raw_iterations, raw_salt, expected = encoded.split("$", 3)
+        iterations = int(raw_iterations)
+        salt = bytes.fromhex(raw_salt)
+        expected_bytes = bytes.fromhex(expected)
+    except (TypeError, ValueError):
+        return False
+    if scheme != "pbkdf2_sha256" or not 100_000 <= iterations <= 2_000_000:
+        return False
+    actual = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, iterations)
+    return secrets.compare_digest(actual, expected_bytes)
 
 
 class PostgresDatabase:
@@ -136,16 +158,33 @@ class SessionStore:
                 self.connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended('gys-schema-init', 0))"
                 )
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('account-alias-namespace', 0))"
+                )
                 for statement in (
                     "CREATE EXTENSION IF NOT EXISTS citext",
+                    """
+                    CREATE TABLE IF NOT EXISTS local_accounts (
+                        id BIGSERIAL PRIMARY KEY,
+                        username CITEXT NOT NULL UNIQUE,
+                        display_name TEXT NOT NULL,
+                        password_hash TEXT NOT NULL,
+                        role TEXT NOT NULL,
+                        active SMALLINT NOT NULL DEFAULT 1,
+                        created_at BIGINT NOT NULL,
+                        updated_at BIGINT NOT NULL
+                    )
+                    """,
                     """
                     CREATE TABLE IF NOT EXISTS upstream_sessions (
                         token_hash TEXT PRIMARY KEY,
                         upstream_user_id BIGINT,
+                        local_account_id BIGINT,
                         username TEXT,
                         display_name TEXT,
                         role TEXT,
                         cookies TEXT NOT NULL,
+                        auth_source TEXT NOT NULL DEFAULT 'upstream',
                         authenticated SMALLINT NOT NULL DEFAULT 0,
                         created_at BIGINT NOT NULL,
                         expires_at BIGINT NOT NULL
@@ -171,6 +210,32 @@ class SessionStore:
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
                     )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS shared_api_cache (
+                        cache_key TEXT PRIMARY KEY,
+                        payload TEXT,
+                        refreshed_at BIGINT NOT NULL DEFAULT 0,
+                        refresh_owner TEXT,
+                        refresh_lease_until BIGINT NOT NULL DEFAULT 0
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS announcements (
+                        id BIGSERIAL PRIMARY KEY,
+                        title TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        is_published SMALLINT NOT NULL DEFAULT 1,
+                        created_by_user_id BIGINT NOT NULL,
+                        created_by_username CITEXT NOT NULL,
+                        created_at BIGINT NOT NULL,
+                        updated_at BIGINT NOT NULL,
+                        published_at BIGINT
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_announcements_published_time
+                    ON announcements(is_published, published_at DESC, id DESC)
                     """,
                     """
                     CREATE TABLE IF NOT EXISTS account_aliases (
@@ -212,16 +277,16 @@ class SessionStore:
                     ON category_settlement_records(sub_account_user_id, created_at DESC, id DESC)
                     """,
                     """
-                    CREATE INDEX IF NOT EXISTS idx_account_aliases_upstream_user_id
-                    ON account_aliases(upstream_user_id)
-                    """,
-                    """
                     ALTER TABLE account_aliases
                     ADD COLUMN IF NOT EXISTS account_kind TEXT NOT NULL DEFAULT 'primary'
                     """,
                     """
                     ALTER TABLE account_aliases
                     ADD COLUMN IF NOT EXISTS upstream_user_id BIGINT
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_account_aliases_upstream_user_id
+                    ON account_aliases(upstream_user_id)
                     """,
                     """
                     ALTER TABLE category_exchange_rates
@@ -231,33 +296,119 @@ class SessionStore:
                     ALTER TABLE category_settlement_records
                     ADD COLUMN IF NOT EXISTS settlement_amount TEXT NOT NULL DEFAULT '0'
                     """,
+                    """
+                    ALTER TABLE upstream_sessions
+                    ADD COLUMN IF NOT EXISTS local_account_id BIGINT
+                    """,
+                    """
+                    ALTER TABLE upstream_sessions
+                    ADD COLUMN IF NOT EXISTS auth_source TEXT NOT NULL DEFAULT 'upstream'
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_upstream_sessions_local_account
+                    ON upstream_sessions(local_account_id)
+                    """,
                 ):
                     self.connection.execute(statement)
-                now = int(time.time() * 1000)
-                self.connection.executemany(
+                reserved_alias = self.connection.execute(
                     """
-                    INSERT INTO account_aliases
-                        (public_username, upstream_username, display_name, account_kind,
-                         active, created_at, updated_at)
-                    VALUES (?, ?, ?, 'primary', 1, ?, ?)
-                    ON CONFLICT(public_username) DO UPDATE SET
-                        upstream_username = excluded.upstream_username,
-                        display_name = excluded.display_name,
-                        account_kind = 'primary',
-                        active = 1,
-                        updated_at = excluded.updated_at
+                    SELECT public_username, upstream_username
+                    FROM account_aliases
+                    WHERE public_username = ? OR upstream_username = ?
+                    LIMIT 1
                     """,
-                    [(*mapping, now, now) for mapping in DEFAULT_ACCOUNT_ALIASES],
+                    (SUPER_ADMIN_USERNAME, SUPER_ADMIN_USERNAME),
+                ).fetchone()
+                if reserved_alias is not None:
+                    raise RuntimeError(
+                        "account_aliases contains the reserved local super-admin username"
+                    )
+                duplicate_sub_id = self.connection.execute(
+                    """
+                    SELECT upstream_user_id
+                    FROM account_aliases
+                    WHERE account_kind = 'sub' AND upstream_user_id IS NOT NULL
+                    GROUP BY upstream_user_id
+                    HAVING COUNT(*) > 1
+                    LIMIT 1
+                    """
+                ).fetchone()
+                if duplicate_sub_id is not None:
+                    raise RuntimeError(
+                        "account_aliases contains duplicate sub-account upstream_user_id: "
+                        f"{duplicate_sub_id['upstream_user_id']}"
+                    )
+                self.connection.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS ux_account_aliases_sub_upstream_user_id
+                    ON account_aliases(upstream_user_id)
+                    WHERE account_kind = 'sub' AND upstream_user_id IS NOT NULL
+                    """
                 )
-                for public_username, upstream_username, display_name in DEFAULT_ACCOUNT_ALIASES:
+                now = int(time.time() * 1000)
+                super_admin = self.connection.execute(
+                    "SELECT id FROM local_accounts WHERE username = ?",
+                    (SUPER_ADMIN_USERNAME,),
+                ).fetchone()
+                if super_admin is None:
+                    initial_password = os.environ.get(
+                        "SUPER_ADMIN_INITIAL_PASSWORD", ""
+                    )
+                    if not initial_password or len(initial_password) > 4_096:
+                        raise RuntimeError(
+                            "SUPER_ADMIN_INITIAL_PASSWORD is required for first startup"
+                        )
                     self.connection.execute(
                         """
-                        UPDATE upstream_sessions
-                        SET username = ?, display_name = ?
-                        WHERE role IN ('admin', 'supplier') AND username = ?
+                        INSERT INTO local_accounts
+                            (username, display_name, password_hash, role, active, created_at, updated_at)
+                        VALUES (?, ?, ?, ?, 1, ?, ?)
                         """,
-                        (public_username, display_name, upstream_username),
+                        (
+                            SUPER_ADMIN_USERNAME,
+                            SUPER_ADMIN_USERNAME,
+                            hash_local_password(initial_password),
+                            SUPER_ADMIN_ROLE,
+                            now,
+                            now,
+                        ),
                     )
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE local_accounts
+                        SET display_name = ?, role = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            SUPER_ADMIN_USERNAME,
+                            SUPER_ADMIN_ROLE,
+                            now,
+                            int(super_admin["id"]),
+                        ),
+                    )
+                self.connection.execute(
+                    """
+                    UPDATE upstream_sessions AS sessions
+                    SET username = aliases.public_username,
+                        display_name = aliases.display_name
+                    FROM account_aliases AS aliases
+                    WHERE sessions.auth_source = 'upstream'
+                      AND aliases.active = 1
+                      AND sessions.username::citext = aliases.upstream_username
+                      AND (
+                        (
+                          aliases.account_kind = 'sub'
+                          AND aliases.upstream_user_id = sessions.upstream_user_id
+                          AND sessions.role = 'sub'
+                        )
+                        OR (
+                          aliases.account_kind = 'primary'
+                          AND sessions.role IN ('admin', 'supplier')
+                        )
+                      )
+                    """
+                )
 
     @staticmethod
     def token_hash(token: str) -> str:
@@ -306,6 +457,210 @@ class SessionStore:
             raise BackendError(503, "会话服务暂时不可用")
         return token, row
 
+    def create_local_session(self, username: str, password: str) -> tuple[str, DbRow] | None:
+        token = secrets.token_urlsafe(32)
+        now = int(time.time() * 1000)
+        with self.lock:
+            with self.connection.transaction():
+                account = self.connection.execute(
+                    """
+                    SELECT id, username, display_name, password_hash, role, active
+                    FROM local_accounts
+                    WHERE username = ?
+                    FOR UPDATE
+                    """,
+                    (username,),
+                ).fetchone()
+                if account is None:
+                    return None
+                if (
+                    not int(account["active"])
+                    or not verify_local_password(password, str(account["password_hash"]))
+                ):
+                    raise BackendError(401, "账号或密码不正确")
+                if str(account["role"]) != SUPER_ADMIN_ROLE:
+                    raise BackendError(403, "当前账号无权登录管理端")
+                values = (
+                    self.token_hash(token),
+                    int(account["id"]),
+                    str(account["username"]),
+                    str(account["display_name"] or account["username"]),
+                    str(account["role"]),
+                    "[]",
+                    LOCAL_AUTH_SOURCE,
+                    1,
+                    now,
+                    now + 7 * DAY_MS,
+                )
+                self.connection.execute(
+                    "DELETE FROM upstream_sessions WHERE expires_at <= ?",
+                    (now,),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO upstream_sessions
+                        (token_hash, local_account_id, username, display_name, role,
+                         cookies, auth_source, authenticated, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                row = self.connection.execute(
+                    "SELECT * FROM upstream_sessions WHERE token_hash = ?", (values[0],)
+                ).fetchone()
+        if row is None:
+            raise BackendError(503, "会话服务暂时不可用")
+        return token, row
+
+    def create_authenticated_upstream_session(
+        self,
+        login_username: str,
+        resolved_upstream_username: str,
+        profile: dict[str, Any] | None,
+        cookies: str,
+    ) -> tuple[str, DbRow, dict[str, Any]]:
+        parsed = validate_profile(profile)
+        if parsed["username"].casefold() != resolved_upstream_username.casefold():
+            raise BackendError(401, "登录账号信息不一致，请重新登录")
+
+        token = secrets.token_urlsafe(32)
+        now = int(time.time() * 1000)
+        with self.lock:
+            with self.connection.transaction():
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('account-alias-namespace', 0))"
+                )
+                alias = self.connection.execute(
+                    """
+                    SELECT public_username, upstream_username, display_name, account_kind,
+                           upstream_user_id, active
+                    FROM account_aliases
+                    WHERE public_username = ?
+                    """,
+                    (login_username,),
+                ).fetchone()
+                if (
+                    alias is None
+                    or not int(alias["active"])
+                    or str(alias["upstream_username"]).casefold()
+                    != resolved_upstream_username.casefold()
+                    or not self.alias_matches_upstream_identity(
+                        alias,
+                        parsed["id"],
+                        parsed["role"],
+                    )
+                ):
+                    raise BackendError(403, "账号未配置有效登录映射，请联系管理员")
+                parsed["username"] = str(alias["public_username"])
+                parsed["display_name"] = str(
+                    alias["display_name"] or alias["public_username"]
+                )
+
+                self.connection.execute(
+                    "DELETE FROM upstream_sessions WHERE expires_at <= ?",
+                    (now,),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO upstream_sessions
+                        (token_hash, upstream_user_id, username, display_name, role,
+                         cookies, auth_source, authenticated, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'upstream', 1, ?, ?)
+                    """,
+                    (
+                        self.token_hash(token),
+                        parsed["id"],
+                        parsed["username"],
+                        parsed["display_name"],
+                        parsed["role"],
+                        cookies,
+                        now,
+                        now + 7 * DAY_MS,
+                    ),
+                )
+                row = self.connection.execute(
+                    "SELECT * FROM upstream_sessions WHERE token_hash = ?",
+                    (self.token_hash(token),),
+                ).fetchone()
+        if row is None:
+            raise BackendError(503, "会话服务暂时不可用")
+        parsed["auth_source"] = "upstream"
+        return token, row, parsed
+
+    def change_local_password(
+        self,
+        local_account_id: int,
+        old_password: str,
+        new_password: str,
+    ) -> None:
+        with self.lock:
+            with self.connection.transaction():
+                row = self.connection.execute(
+                    """
+                    SELECT password_hash, active
+                    FROM local_accounts
+                    WHERE id = ?
+                    FOR UPDATE
+                    """,
+                    (local_account_id,),
+                ).fetchone()
+                if (
+                    row is None
+                    or not int(row["active"])
+                    or not verify_local_password(old_password, str(row["password_hash"]))
+                ):
+                    raise BackendError(400, "旧密码不正确")
+                self.connection.execute(
+                    """
+                    UPDATE local_accounts
+                    SET password_hash = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        hash_local_password(new_password),
+                        int(time.time() * 1000),
+                        local_account_id,
+                    ),
+                )
+                self.connection.execute(
+                    "DELETE FROM upstream_sessions WHERE local_account_id = ?",
+                    (local_account_id,),
+                )
+
+    def local_account_is_active(self, local_account_id: int, username: str, role: str) -> bool:
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT 1
+                FROM local_accounts
+                WHERE id = ? AND username = ? AND role = ? AND active = 1
+                """,
+                (local_account_id, username, role),
+            ).fetchone()
+        return row is not None
+
+    @staticmethod
+    def alias_matches_upstream_identity(
+        alias: DbRow,
+        upstream_user_id: Any,
+        role: Any,
+    ) -> bool:
+        account_kind = str(alias.get("account_kind") or "")
+        role_name = str(role or "")
+        if account_kind == "primary":
+            return role_name in {"admin", "supplier"}
+        if account_kind != "sub" or role_name != "sub":
+            return False
+        mapped_user_id = alias.get("upstream_user_id")
+        try:
+            return (
+                mapped_user_id is not None
+                and upstream_user_id is not None
+                and int(mapped_user_id) == int(upstream_user_id)
+            )
+        except (TypeError, ValueError):
+            return False
+
     def get_session(self, token: str) -> DbRow | None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token or ""):
             return None
@@ -317,6 +672,22 @@ class SessionStore:
             ).fetchone()
         if row is None or int(row["created_at"]) + 30 * DAY_MS <= now:
             return None
+        if int(row.get("authenticated") or 0) and row.get("auth_source") == "upstream":
+            with self.lock:
+                alias = self.connection.execute(
+                    """
+                    SELECT account_kind, upstream_user_id
+                    FROM account_aliases
+                    WHERE public_username = ? AND active = 1
+                    """,
+                    (row.get("username"),),
+                ).fetchone()
+            if alias is None or not self.alias_matches_upstream_identity(
+                alias,
+                row.get("upstream_user_id"),
+                row.get("role"),
+            ):
+                return None
         return row
 
     def current(self, session: DbRow) -> DbRow:
@@ -354,193 +725,250 @@ class SessionStore:
                 ),
             )
             self.connection.commit()
+        parsed["auth_source"] = "upstream"
         return parsed
 
     def resolve_login_username(self, username: str) -> str:
         with self.lock:
             alias = self.connection.execute(
                 """
-                SELECT upstream_username
+                SELECT upstream_username, active
                 FROM account_aliases
-                WHERE public_username = ? AND active = 1
+                WHERE public_username = ?
                 """,
                 (username,),
             ).fetchone()
             if alias is not None:
+                if not int(alias["active"]):
+                    raise BackendError(403, "账号未配置有效登录映射，请联系管理员")
                 return str(alias["upstream_username"])
-            reserved = self.connection.execute(
-                """
-                SELECT 1
-                FROM account_aliases
-                WHERE upstream_username = ? AND active = 1
-                """,
-                (username,),
-            ).fetchone()
-        if reserved is not None:
-            raise BackendError(401, "请使用映射后的用户名登录")
-        return username
+        raise BackendError(403, "账号未配置有效登录映射，请联系管理员")
 
     def publicize_profile(self, profile: dict[str, Any]) -> dict[str, Any]:
         parsed = validate_profile(profile)
         with self.lock:
             alias = self.connection.execute(
                 """
-                SELECT public_username, display_name
+                SELECT public_username, display_name, account_kind, upstream_user_id
                 FROM account_aliases
                 WHERE upstream_username = ? AND active = 1
                 """,
                 (parsed["username"],),
             ).fetchone()
-        if alias is not None:
-            parsed["username"] = str(alias["public_username"])
-            parsed["display_name"] = str(alias["display_name"] or alias["public_username"])
+        if alias is None or not self.alias_matches_upstream_identity(
+            alias,
+            parsed["id"],
+            parsed["role"],
+        ):
+            raise BackendError(401, "账号未配置有效登录映射，请重新登录")
+        parsed["username"] = str(alias["public_username"])
+        parsed["display_name"] = str(alias["display_name"] or alias["public_username"])
+        parsed["auth_source"] = "upstream"
         return parsed
 
-    def reserve_sub_account_alias(
+    def account_mappings(self) -> list[DbRow]:
+        with self.lock:
+            rows = self.connection.execute(
+                """
+                SELECT public_username, upstream_username, display_name, account_kind,
+                       upstream_user_id, active, created_at, updated_at
+                FROM account_aliases
+                ORDER BY account_kind, public_username
+                """
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_account_mapping(
         self,
         public_username: str,
         upstream_username: str,
         display_name: str,
-    ) -> None:
+        account_kind: str,
+        upstream_user_id: int | None,
+    ) -> DbRow:
+        if (
+            public_username.casefold() == SUPER_ADMIN_USERNAME.casefold()
+            or upstream_username.casefold() == SUPER_ADMIN_USERNAME.casefold()
+        ):
+            raise BackendError(409, "超级管理员账号名不可用于用户映射")
         now = int(time.time() * 1000)
         with self.lock:
-            with self.connection.transaction():
-                conflict = self.connection.execute(
-                    """
-                    SELECT 1 FROM account_aliases
-                    WHERE active = 1
-                      AND (
-                        public_username IN (?, ?)
-                        OR upstream_username IN (?, ?)
-                      )
-                    """,
-                    (
-                        public_username,
-                        upstream_username,
-                        public_username,
-                        upstream_username,
-                    ),
-                ).fetchone()
-                if conflict is not None:
-                    raise BackendError(409, "本站用户名或GYS用户名已存在")
-                self.connection.execute(
-                    "DELETE FROM account_aliases WHERE active = 0 AND public_username = ?",
-                    (public_username,),
-                )
-                self.connection.execute(
-                    """
-                    INSERT INTO account_aliases
-                        (public_username, upstream_username, display_name, account_kind,
-                         upstream_user_id, active, created_at, updated_at)
-                    VALUES (?, ?, ?, 'sub', NULL, 1, ?, ?)
-                    """,
-                    (public_username, upstream_username, display_name, now, now),
-                )
-
-    def release_sub_account_alias(self, upstream_username: str) -> None:
-        with self.lock:
-            self.connection.execute(
-                "DELETE FROM account_aliases WHERE account_kind = 'sub' AND upstream_username = ?",
-                (upstream_username,),
-            )
-            self.connection.commit()
-
-    def attach_sub_account_alias(self, upstream_username: str, upstream_user_id: int | None) -> None:
-        if upstream_user_id is None or upstream_user_id <= 0:
-            return
-        with self.lock:
-            self.connection.execute(
-                """
-                UPDATE account_aliases
-                SET upstream_user_id = ?, updated_at = ?
-                WHERE account_kind = 'sub' AND upstream_username = ?
-                """,
-                (upstream_user_id, int(time.time() * 1000), upstream_username),
-            )
-            self.connection.commit()
-
-    def ensure_sub_account_alias(self, item: dict[str, Any]) -> dict[str, Any]:
-        try:
-            upstream_user_id = int(item.get("id"))
-        except (TypeError, ValueError):
-            return item
-        upstream_username = item.get("username")
-        upstream_username = upstream_username.strip() if isinstance(upstream_username, str) else ""
-        if upstream_user_id <= 0 or not upstream_username:
-            return item
-        display_name = item.get("display_name")
-        display_name = display_name.strip() if isinstance(display_name, str) else upstream_username
-        now = int(time.time() * 1000)
-        with self.lock:
-            with self.connection.transaction():
-                self.connection.execute(
-                    """
-                    SELECT pg_advisory_xact_lock(hashtextextended(?, 0))
-                    """,
-                    (f"sub-account-alias:{upstream_username}",),
-                )
-                alias = self.connection.execute(
-                    """
-                    SELECT public_username, display_name
-                    FROM account_aliases
-                    WHERE upstream_username = ? AND active = 1
-                    """,
-                    (upstream_username,),
-                ).fetchone()
-                if alias is None:
-                    base = f"sub_{upstream_user_id}"
-                    public_username = base
-                    suffix = 2
-                    while self.connection.execute(
-                        "SELECT 1 FROM account_aliases WHERE public_username = ? AND active = 1",
-                        (public_username,),
-                    ).fetchone() is not None:
-                        public_username = f"{base}_{suffix}"
-                        suffix += 1
+            try:
+                with self.connection.transaction():
                     self.connection.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended('account-alias-namespace', 0))"
+                    )
+                    conflict = self.connection.execute(
+                        """
+                        SELECT 1
+                        FROM account_aliases
+                        WHERE public_username IN (?, ?)
+                           OR upstream_username IN (?, ?)
+                        """,
+                        (
+                            public_username,
+                            upstream_username,
+                            public_username,
+                            upstream_username,
+                        ),
+                    ).fetchone()
+                    if conflict is not None:
+                        raise BackendError(409, "本站用户名或 GYS 用户名已存在")
+                    if account_kind == "sub":
+                        id_conflict = self.connection.execute(
+                            """
+                            SELECT 1
+                            FROM account_aliases
+                            WHERE account_kind = 'sub' AND upstream_user_id = ?
+                            """,
+                            (upstream_user_id,),
+                        ).fetchone()
+                        if id_conflict is not None:
+                            raise BackendError(409, "子账号 ID 已绑定其他用户映射")
+                    row = self.connection.execute(
                         """
                         INSERT INTO account_aliases
                             (public_username, upstream_username, display_name, account_kind,
                              upstream_user_id, active, created_at, updated_at)
-                        VALUES (?, ?, ?, 'sub', ?, 1, ?, ?)
+                        VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                        RETURNING public_username, upstream_username, display_name, account_kind,
+                                  upstream_user_id, active, created_at, updated_at
                         """,
                         (
                             public_username,
                             upstream_username,
                             display_name,
+                            account_kind,
                             upstream_user_id,
                             now,
                             now,
                         ),
-                    )
-                    alias = {"public_username": public_username, "display_name": display_name}
-                else:
+                    ).fetchone()
                     self.connection.execute(
                         """
-                        UPDATE account_aliases
-                        SET upstream_user_id = COALESCE(upstream_user_id, ?), updated_at = ?
-                        WHERE upstream_username = ?
+                        DELETE FROM upstream_sessions
+                        WHERE auth_source = 'upstream' AND username::citext IN (?, ?)
                         """,
-                        (upstream_user_id, now, upstream_username),
+                        (public_username, upstream_username),
                     )
-                self.connection.execute(
-                    """
-                    UPDATE upstream_sessions
-                    SET username = ?, display_name = ?
-                    WHERE role = 'sub' AND username = ?
-                    """,
-                    (alias["public_username"], alias["display_name"], upstream_username),
-                )
-        return {
-            **item,
-            "original_username": upstream_username,
-            "username": str(alias["public_username"]),
-            "display_name": str(alias["display_name"] or alias["public_username"]),
-        }
+            except psycopg.errors.UniqueViolation as error:
+                raise BackendError(409, "本站用户名或 GYS 用户名已存在") from error
+        if row is None:
+            raise BackendError(503, "用户映射保存失败")
+        return dict(row)
+
+    def update_account_mapping(
+        self,
+        current_public_username: str,
+        public_username: str,
+        upstream_username: str,
+        display_name: str,
+        active: bool,
+        account_kind: str | None,
+        upstream_user_id: int | None,
+    ) -> DbRow:
+        if (
+            public_username.casefold() == SUPER_ADMIN_USERNAME.casefold()
+            or upstream_username.casefold() == SUPER_ADMIN_USERNAME.casefold()
+        ):
+            raise BackendError(409, "超级管理员账号名不可用于用户映射")
+        now = int(time.time() * 1000)
+        with self.lock:
+            try:
+                with self.connection.transaction():
+                    self.connection.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended('account-alias-namespace', 0))"
+                    )
+                    current = self.connection.execute(
+                        """
+                        SELECT public_username, upstream_username, account_kind, upstream_user_id
+                        FROM account_aliases
+                        WHERE public_username = ?
+                        FOR UPDATE
+                        """,
+                        (current_public_username,),
+                    ).fetchone()
+                    if current is None:
+                        raise BackendError(404, "用户映射不存在")
+                    next_account_kind = account_kind or str(current["account_kind"])
+                    next_upstream_user_id = (
+                        upstream_user_id
+                        if account_kind is not None
+                        else current["upstream_user_id"]
+                    )
+                    conflict = self.connection.execute(
+                        """
+                        SELECT 1
+                        FROM account_aliases
+                        WHERE public_username <> ?
+                          AND (
+                            public_username IN (?, ?)
+                            OR upstream_username IN (?, ?)
+                          )
+                        """,
+                        (
+                            current_public_username,
+                            public_username,
+                            upstream_username,
+                            public_username,
+                            upstream_username,
+                        ),
+                    ).fetchone()
+                    if conflict is not None:
+                        raise BackendError(409, "本站用户名或 GYS 用户名已存在")
+                    if next_account_kind == "sub":
+                        id_conflict = self.connection.execute(
+                            """
+                            SELECT 1
+                            FROM account_aliases
+                            WHERE account_kind = 'sub'
+                              AND upstream_user_id = ?
+                              AND public_username <> ?
+                            """,
+                            (next_upstream_user_id, current_public_username),
+                        ).fetchone()
+                        if id_conflict is not None:
+                            raise BackendError(409, "子账号 ID 已绑定其他用户映射")
+                    row = self.connection.execute(
+                        """
+                        UPDATE account_aliases
+                        SET public_username = ?, upstream_username = ?, display_name = ?,
+                            account_kind = ?, upstream_user_id = ?, active = ?, updated_at = ?
+                        WHERE public_username = ?
+                        RETURNING public_username, upstream_username, display_name, account_kind,
+                                  upstream_user_id, active, created_at, updated_at
+                        """,
+                        (
+                            public_username,
+                            upstream_username,
+                            display_name,
+                            next_account_kind,
+                            next_upstream_user_id,
+                            1 if active else 0,
+                            now,
+                            current_public_username,
+                        ),
+                    ).fetchone()
+                    session_names = (
+                        str(current["public_username"]),
+                        str(current["upstream_username"]),
+                    )
+                    self.connection.execute(
+                        """
+                        DELETE FROM upstream_sessions
+                        WHERE auth_source = 'upstream' AND username::citext IN (?, ?, ?, ?)
+                        """,
+                        (*session_names, public_username, upstream_username),
+                    )
+            except psycopg.errors.UniqueViolation as error:
+                raise BackendError(409, "用户名或子账号 ID 已绑定其他用户映射") from error
+        if row is None:
+            raise BackendError(404, "用户映射不存在")
+        return dict(row)
 
     def publicize_sub_accounts(self, data: Any) -> Any:
         if isinstance(data, list):
-            return [self.ensure_sub_account_alias(item) if isinstance(item, dict) else item for item in data]
+            return [self.publicize_sub_account(item) if isinstance(item, dict) else item for item in data]
         if not isinstance(data, dict):
             return data
         items = data.get("items")
@@ -548,92 +976,62 @@ class SessionStore:
             return {
                 **data,
                 "items": [
-                    self.ensure_sub_account_alias(item) if isinstance(item, dict) else item
+                    self.publicize_sub_account(item) if isinstance(item, dict) else item
                     for item in items
                 ],
             }
+        if "id" in data and "username" in data:
+            return self.publicize_sub_account(data)
         return data
 
-    def rename_sub_account_alias(
-        self,
-        upstream_user_id: int,
-        public_username: str,
-        display_name: str,
-    ) -> None:
-        now = int(time.time() * 1000)
-        with self.lock:
-            with self.connection.transaction():
-                current = self.connection.execute(
-                    """
-                    SELECT public_username, upstream_username
-                    FROM account_aliases
-                    WHERE account_kind = 'sub' AND upstream_user_id = ? AND active = 1
-                    FOR UPDATE
-                    """,
-                    (upstream_user_id,),
-                ).fetchone()
-                if current is None:
-                    raise BackendError(404, "子账号映射不存在，请刷新后重试")
-                conflict = self.connection.execute(
-                    """
-                    SELECT 1 FROM account_aliases
-                    WHERE public_username = ? AND public_username <> ? AND active = 1
-                    """,
-                    (public_username, current["public_username"]),
-                ).fetchone()
-                if conflict is not None:
-                    raise BackendError(409, "本站用户名已存在")
-                self.connection.execute(
-                    """
-                    UPDATE account_aliases
-                    SET public_username = ?, display_name = ?, updated_at = ?
-                    WHERE account_kind = 'sub' AND upstream_user_id = ?
-                    """,
-                    (public_username, display_name, now, upstream_user_id),
-                )
-                self.connection.execute(
-                    """
-                    UPDATE upstream_sessions
-                    SET username = ?, display_name = ?
-                    WHERE role = 'sub' AND username IN (?, ?)
-                    """,
-                    (
-                        public_username,
-                        display_name,
-                        current["public_username"],
-                        current["upstream_username"],
-                    ),
-                )
+    def publicize_sub_account(self, item: dict[str, Any]) -> dict[str, Any]:
+        upstream_username = item.get("username")
+        upstream_username = (
+            upstream_username.strip() if isinstance(upstream_username, str) else ""
+        )
+        try:
+            upstream_user_id = int(item.get("id"))
+        except (TypeError, ValueError):
+            upstream_user_id = 0
 
-    def assert_sub_account_alias_available(self, upstream_user_id: int, public_username: str) -> None:
-        with self.lock:
-            current = self.connection.execute(
-                """
-                SELECT public_username
-                FROM account_aliases
-                WHERE account_kind = 'sub' AND upstream_user_id = ? AND active = 1
-                """,
-                (upstream_user_id,),
-            ).fetchone()
-            if current is None:
-                raise BackendError(404, "子账号映射不存在，请刷新后重试")
-            conflict = self.connection.execute(
-                """
-                SELECT 1 FROM account_aliases
-                WHERE public_username = ? AND public_username <> ? AND active = 1
-                """,
-                (public_username, current["public_username"]),
-            ).fetchone()
-        if conflict is not None:
-            raise BackendError(409, "本站用户名已存在")
+        alias: DbRow | None = None
+        if upstream_user_id > 0 and upstream_username:
+            with self.lock:
+                alias = self.connection.execute(
+                    """
+                    SELECT public_username, display_name, active
+                    FROM account_aliases
+                    WHERE account_kind = 'sub'
+                      AND upstream_user_id = ?
+                      AND upstream_username = ?
+                    """,
+                    (upstream_user_id, upstream_username),
+                ).fetchone()
+
+        return {
+            **item,
+            "username": upstream_username,
+            "original_username": upstream_username,
+            "upstream_username": upstream_username,
+            "public_username": str(alias["public_username"]) if alias is not None else None,
+            "mapping_active": bool(int(alias["active"])) if alias is not None else None,
+            "mapping_display_name": (
+                str(alias["display_name"] or alias["public_username"])
+                if alias is not None
+                else None
+            ),
+        }
 
     def delete_sub_account_alias(self, upstream_user_id: int) -> None:
         with self.lock:
-            self.connection.execute(
-                "DELETE FROM account_aliases WHERE account_kind = 'sub' AND upstream_user_id = ?",
-                (upstream_user_id,),
-            )
-            self.connection.commit()
+            with self.connection.transaction():
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended('account-alias-namespace', 0))"
+                )
+                self.connection.execute(
+                    "DELETE FROM account_aliases WHERE account_kind = 'sub' AND upstream_user_id = ?",
+                    (upstream_user_id,),
+                )
 
     def category_rates(self, sub_account_user_id: int) -> dict[str, Decimal]:
         with self.lock:
@@ -855,6 +1253,83 @@ class SessionStore:
                     (sub_account_user_id,),
                 )
 
+    def announcements(self, published_only: bool = True) -> list[DbRow]:
+        where = "WHERE is_published = 1" if published_only else ""
+        limit = 100 if published_only else 500
+        with self.lock:
+            rows = self.connection.execute(
+                f"""
+                SELECT id, title, content, is_published,
+                       created_at, updated_at, published_at
+                FROM announcements
+                {where}
+                ORDER BY COALESCE(published_at, updated_at) DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def create_announcement(
+        self,
+        title: str,
+        content: str,
+        created_by_user_id: int,
+        created_by_username: str,
+    ) -> DbRow:
+        now = int(time.time() * 1000)
+        with self.lock:
+            row = self.connection.execute(
+                """
+                INSERT INTO announcements
+                    (title, content, is_published, created_by_user_id,
+                     created_by_username, created_at, updated_at, published_at)
+                VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+                RETURNING id, title, content, is_published,
+                          created_at, updated_at, published_at
+                """,
+                (
+                    title,
+                    content,
+                    created_by_user_id,
+                    created_by_username,
+                    now,
+                    now,
+                    now,
+                ),
+            ).fetchone()
+        if row is None:
+            raise BackendError(503, "公告保存失败")
+        return dict(row)
+
+    def set_announcement_published(self, announcement_id: int, published: bool) -> DbRow:
+        now = int(time.time() * 1000)
+        published_value = 1 if published else 0
+        with self.lock:
+            row = self.connection.execute(
+                """
+                UPDATE announcements
+                SET is_published = ?, updated_at = ?,
+                    published_at = CASE WHEN ? = 1 THEN ? ELSE NULL END
+                WHERE id = ?
+                RETURNING id, title, content, is_published,
+                          created_at, updated_at, published_at
+                """,
+                (published_value, now, published_value, now, announcement_id),
+            ).fetchone()
+        if row is None:
+            raise BackendError(404, "公告不存在")
+        return dict(row)
+
+    def delete_announcement(self, announcement_id: int) -> None:
+        with self.lock:
+            row = self.connection.execute(
+                "DELETE FROM announcements WHERE id = ? RETURNING id",
+                (announcement_id,),
+            ).fetchone()
+        if row is None:
+            raise BackendError(404, "公告不存在")
+
     def touch(self, session: DbRow) -> int:
         now = int(time.time() * 1000)
         expires_at = min(int(session["created_at"]) + 30 * DAY_MS, now + 7 * DAY_MS)
@@ -905,6 +1380,99 @@ class SessionStore:
                     )
                     allowed = next_count <= maximum
         return allowed
+
+    def read_shared_cache(self, cache_key: str) -> tuple[Any | None, int, int]:
+        with self.lock:
+            row = self.connection.execute(
+                """
+                SELECT payload, refreshed_at, refresh_lease_until
+                FROM shared_api_cache
+                WHERE cache_key = ?
+                """,
+                (cache_key,),
+            ).fetchone()
+        if row is None or not isinstance(row.get("payload"), str):
+            return (
+                None,
+                int(row["refreshed_at"]) if row is not None else 0,
+                int(row["refresh_lease_until"]) if row is not None else 0,
+            )
+        try:
+            payload = json.loads(row["payload"])
+        except (TypeError, ValueError):
+            payload = None
+        return payload, int(row["refreshed_at"]), int(row["refresh_lease_until"])
+
+    def claim_shared_cache_refresh(
+        self,
+        cache_key: str,
+        minimum_refreshed_at: int,
+        lease_ms: int,
+    ) -> str | None:
+        now = int(time.time() * 1000)
+        owner = uuid.uuid4().hex
+        with self.lock:
+            with self.connection.transaction():
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                    (f"shared-cache:{cache_key}",),
+                )
+                row = self.connection.execute(
+                    """
+                    SELECT payload, refreshed_at, refresh_lease_until
+                    FROM shared_api_cache
+                    WHERE cache_key = ?
+                    FOR UPDATE
+                    """,
+                    (cache_key,),
+                ).fetchone()
+                if (
+                    row is not None
+                    and isinstance(row.get("payload"), str)
+                    and int(row["refreshed_at"]) > minimum_refreshed_at
+                ):
+                    return None
+                if row is not None and int(row["refresh_lease_until"]) > now:
+                    return None
+                self.connection.execute(
+                    """
+                    INSERT INTO shared_api_cache
+                        (cache_key, payload, refreshed_at, refresh_owner, refresh_lease_until)
+                    VALUES (?, NULL, 0, ?, ?)
+                    ON CONFLICT(cache_key) DO UPDATE SET
+                        refresh_owner = excluded.refresh_owner,
+                        refresh_lease_until = excluded.refresh_lease_until
+                    """,
+                    (cache_key, owner, now + lease_ms),
+                )
+        return owner
+
+    def save_shared_cache(self, cache_key: str, owner: str, payload: Any) -> bool:
+        now = int(time.time() * 1000)
+        serialized = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        with self.lock:
+            row = self.connection.execute(
+                """
+                UPDATE shared_api_cache
+                SET payload = ?, refreshed_at = ?, refresh_owner = NULL,
+                    refresh_lease_until = 0
+                WHERE cache_key = ? AND refresh_owner = ?
+                RETURNING cache_key
+                """,
+                (serialized, now, cache_key, owner),
+            ).fetchone()
+        return row is not None
+
+    def release_shared_cache_refresh(self, cache_key: str, owner: str) -> None:
+        with self.lock:
+            self.connection.execute(
+                """
+                UPDATE shared_api_cache
+                SET refresh_owner = NULL, refresh_lease_until = 0
+                WHERE cache_key = ? AND refresh_owner = ?
+                """,
+                (cache_key, owner),
+            )
 
 
 store = SessionStore()
@@ -987,14 +1555,153 @@ def validate_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
 
 
 def public_profile(session: DbRow) -> dict[str, Any]:
-    if not session["authenticated"] or not session["upstream_user_id"]:
-        raise BackendError(401, "请登录原 GYS 账号")
+    if not session["authenticated"]:
+        raise BackendError(401, "请重新登录账号")
+    if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+        local_account_id = session.get("local_account_id")
+        if not local_account_id or not store.local_account_is_active(
+            int(local_account_id),
+            str(session.get("username") or ""),
+            str(session.get("role") or ""),
+        ):
+            raise BackendError(401, "请重新登录账号")
+        return {
+            "id": int(local_account_id),
+            "user_id": int(local_account_id),
+            "username": session["username"],
+            "display_name": session["display_name"] or session["username"],
+            "role": session["role"],
+            "auth_source": LOCAL_AUTH_SOURCE,
+        }
+    if not session["upstream_user_id"]:
+        raise BackendError(401, "请重新登录账号")
     return {
         "id": session["upstream_user_id"],
         "user_id": session["upstream_user_id"],
         "username": session["username"],
         "display_name": session["display_name"] or session["username"],
         "role": session["role"],
+        "auth_source": "upstream",
+    }
+
+
+def is_super_admin(session: DbRow) -> bool:
+    local_account_id = session.get("local_account_id")
+    return bool(
+        session.get("auth_source") == LOCAL_AUTH_SOURCE
+        and session.get("role") == SUPER_ADMIN_ROLE
+        and str(session.get("username") or "").strip().casefold()
+        == SUPER_ADMIN_USERNAME.casefold()
+        and local_account_id
+        and store.local_account_is_active(
+            int(local_account_id),
+            str(session.get("username") or ""),
+            SUPER_ADMIN_ROLE,
+        )
+    )
+
+
+def assert_super_admin(session: DbRow) -> None:
+    if not is_super_admin(session):
+        raise BackendError(403, "当前账号无权使用超级管理员功能")
+
+
+def assert_announcement_admin(session: DbRow) -> None:
+    if not is_super_admin(session):
+        raise BackendError(403, "当前账号无权管理公告")
+
+
+def account_mapping_payload(row: DbRow) -> dict[str, Any]:
+    upstream_user_id = row.get("upstream_user_id")
+    return {
+        "public_username": str(row["public_username"]),
+        "upstream_username": str(row["upstream_username"]),
+        "display_name": str(row["display_name"]),
+        "account_kind": str(row["account_kind"]),
+        "upstream_user_id": int(upstream_user_id) if upstream_user_id is not None else None,
+        "active": bool(int(row["active"])),
+        "created_at": int(row["created_at"]),
+        "updated_at": int(row["updated_at"]),
+    }
+
+
+def parse_account_mapping_body(
+    body: dict[str, Any],
+    *,
+    require_active: bool,
+) -> tuple[str, str, str, bool, str | None, int | None]:
+    public_username = body.get("public_username")
+    upstream_username = body.get("upstream_username")
+    display_name = body.get("display_name")
+    public_username = (
+        public_username.strip() if isinstance(public_username, str) else ""
+    )
+    upstream_username = (
+        upstream_username.strip() if isinstance(upstream_username, str) else ""
+    )
+    display_name = display_name.strip() if isinstance(display_name, str) else ""
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", public_username):
+        raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", upstream_username):
+        raise BackendError(400, "GYS用户名须为3至64位字母、数字、点、横线或下划线")
+    if (
+        public_username.casefold() == SUPER_ADMIN_USERNAME.casefold()
+        or upstream_username.casefold() == SUPER_ADMIN_USERNAME.casefold()
+    ):
+        raise BackendError(409, "超级管理员账号名不可用于用户映射")
+    if not display_name or len(display_name) > 128:
+        raise BackendError(400, "显示名须为 1 至 128 个字符")
+    if require_active and "active" not in body:
+        raise BackendError(400, "用户映射状态无效")
+    active = body.get("active", True)
+    if not isinstance(active, bool):
+        raise BackendError(400, "用户映射状态无效")
+
+    account_kind: str | None = None
+    upstream_user_id: int | None = None
+    if "account_kind" in body:
+        raw_account_kind = body.get("account_kind")
+        account_kind = raw_account_kind.strip() if isinstance(raw_account_kind, str) else ""
+        if account_kind not in {"primary", "sub"}:
+            raise BackendError(400, "账号类型无效")
+        raw_upstream_user_id = body.get("upstream_user_id")
+        if account_kind == "sub":
+            if isinstance(raw_upstream_user_id, bool):
+                raise BackendError(400, "子账号 ID 必须为正整数")
+            try:
+                upstream_user_id = int(raw_upstream_user_id)
+            except (TypeError, ValueError):
+                raise BackendError(400, "子账号 ID 必须为正整数") from None
+            if upstream_user_id <= 0:
+                raise BackendError(400, "子账号 ID 必须为正整数")
+        elif raw_upstream_user_id is not None and raw_upstream_user_id != "":
+            raise BackendError(400, "主账号不能设置子账号 ID")
+    elif (
+        "upstream_user_id" in body
+        and body.get("upstream_user_id") is not None
+        and body.get("upstream_user_id") != ""
+    ):
+        raise BackendError(400, "请先选择账号类型")
+    return (
+        public_username,
+        upstream_username,
+        display_name,
+        active,
+        account_kind,
+        upstream_user_id,
+    )
+
+
+def announcement_payload(row: DbRow) -> dict[str, Any]:
+    published_at = row.get("published_at")
+    return {
+        "id": int(row["id"]),
+        "title": str(row["title"]),
+        "content": str(row["content"]),
+        "published": bool(int(row["is_published"])),
+        "createdAt": int(row["created_at"]),
+        "updatedAt": int(row["updated_at"]),
+        "publishedAt": int(published_at) if published_at is not None else None,
     }
 
 
@@ -1469,6 +2176,60 @@ def sanitize_data(value: Any) -> Any:
     return {key: sanitize_data(item) for key, item in value.items() if key not in blocked}
 
 
+async def cached_model_gaps(session: DbRow) -> Any:
+    stale_payload: Any | None = None
+    cold_cache_deadline = time.monotonic() + MODEL_GAPS_REFRESH_LEASE_MS / 1000
+
+    while True:
+        now = int(time.time() * 1000)
+        payload, refreshed_at, _ = store.read_shared_cache(MODEL_GAPS_CACHE_KEY)
+        if payload is not None and refreshed_at > now - MODEL_GAPS_CACHE_TTL_MS:
+            return payload
+        if payload is not None:
+            stale_payload = payload
+
+        owner = store.claim_shared_cache_refresh(
+            MODEL_GAPS_CACHE_KEY,
+            now - MODEL_GAPS_CACHE_TTL_MS,
+            MODEL_GAPS_REFRESH_LEASE_MS,
+        )
+        if owner is not None:
+            try:
+                fresh_payload = sanitize_data(
+                    await authorized_json(session, "/api/model-gaps")
+                )
+                if store.save_shared_cache(
+                    MODEL_GAPS_CACHE_KEY,
+                    owner,
+                    fresh_payload,
+                ):
+                    return fresh_payload
+                latest_payload, _, _ = store.read_shared_cache(MODEL_GAPS_CACHE_KEY)
+                return latest_payload if latest_payload is not None else fresh_payload
+            except Exception:
+                store.release_shared_cache_refresh(MODEL_GAPS_CACHE_KEY, owner)
+                if stale_payload is not None:
+                    return stale_payload
+                raise
+
+        latest_payload, latest_refreshed_at, _ = store.read_shared_cache(
+            MODEL_GAPS_CACHE_KEY
+        )
+        latest_now = int(time.time() * 1000)
+        if (
+            latest_payload is not None
+            and latest_refreshed_at > latest_now - MODEL_GAPS_CACHE_TTL_MS
+        ):
+            return latest_payload
+        if latest_payload is not None:
+            stale_payload = latest_payload
+        if stale_payload is not None:
+            return stale_payload
+        if time.monotonic() >= cold_cache_deadline:
+            raise BackendError(503, "模型缺口数据正在更新，请稍后重试")
+        await asyncio.sleep(0.2)
+
+
 def request_origin(request: Request) -> str:
     configured = os.environ.get("GYS_PUBLIC_ORIGIN", "").strip()
     if configured:
@@ -1619,9 +2380,20 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(401, "账号或密码不正确")
             if not store.within_limit(f"login:{remote_key}:{username.lower()}", 10, 5 * 60_000):
                 raise BackendError(429, "登录尝试过多，请五分钟后重试")
+            local_session = store.create_local_session(username, password)
+            if local_session is not None:
+                old_session = session
+                token, session = local_session
+                store.delete(old_session)
+                return success_response(
+                    request,
+                    request_id,
+                    public_profile(session),
+                    (token, 7 * 86_400),
+                )
+            upstream_username = store.resolve_login_username(username)
             if session is None or session["authenticated"]:
                 token, session = store.create_session()
-            upstream_username = store.resolve_login_username(username)
             login_body: dict[str, Any] = {"username": upstream_username, "password": password}
             if isinstance(body.get("captcha_token"), str):
                 login_body["captcha_token"] = body["captcha_token"]
@@ -1635,10 +2407,14 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                         error.request_id,
                     ) from error
                 raise
-            parsed = store.publicize_profile(profile)
             latest = store.current(session)
             old_session = session
-            token, session = store.create_session(parsed, latest["cookies"])
+            token, session, parsed = store.create_authenticated_upstream_session(
+                username,
+                upstream_username,
+                profile if isinstance(profile, dict) else None,
+                latest["cookies"],
+            )
             store.delete(old_session)
             return success_response(request, request_id, parsed, (token, 7 * 86_400))
 
@@ -1647,19 +2423,199 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             return success_response(request, request_id, {"message": "已退出登录"}, ("", 0))
 
         if session is None or not session["authenticated"]:
-            raise BackendError(401, "请登录原 GYS 账号")
+            raise BackendError(401, "请重新登录账号")
         cookie = (token, store.touch(session))
 
         if path == "/api/auth/profile" and request.method == "GET":
+            if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+                return success_response(request, request_id, public_profile(session), cookie)
             profile = await authorized_json(session, path)
             data = store.save_profile(session, profile) if isinstance(profile, dict) else public_profile(session)
             return success_response(request, request_id, data, cookie)
 
         if path == "/api/auth/refresh" and request.method == "POST":
+            if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+                return success_response(request, request_id, public_profile(session), cookie)
             await upstream_json(session, path, method="POST", body={})
             profile = await upstream_json(session, "/api/auth/profile")
             data = store.save_profile(session, profile) if isinstance(profile, dict) else public_profile(session)
             return success_response(request, request_id, data, cookie)
+
+        if path == "/api/model-gaps" and request.method == "GET":
+            refresh = request.query_params.get("refresh")
+            if refresh not in {None, "1", "true"}:
+                raise BackendError(400, "刷新参数无效")
+            for field in ("user_id", "supplier_id", "uploader_id", "upstream_id"):
+                if field in request.query_params:
+                    raise BackendError(400, "不允许指定数据账号")
+            if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+                assert_super_admin(session)
+                cached_payload, _, _ = store.read_shared_cache(MODEL_GAPS_CACHE_KEY)
+                if cached_payload is None:
+                    raise BackendError(503, "模型缺口数据尚未缓存，请稍后重试")
+                return success_response(
+                    request,
+                    request_id,
+                    cached_payload,
+                    cookie,
+                )
+            return success_response(
+                request,
+                request_id,
+                await cached_model_gaps(session),
+                cookie,
+            )
+
+        if path == "/api/announcements" and request.method == "GET":
+            rows = store.announcements(published_only=True)
+            return success_response(
+                request,
+                request_id,
+                {
+                    "items": [announcement_payload(row) for row in rows],
+                    "total": len(rows),
+                },
+                cookie,
+            )
+
+        if path == "/api/announcement-management" and request.method in {"GET", "POST"}:
+            assert_announcement_admin(session)
+            if request.method == "GET":
+                rows = store.announcements(published_only=False)
+                return success_response(
+                    request,
+                    request_id,
+                    {
+                        "items": [announcement_payload(row) for row in rows],
+                        "total": len(rows),
+                    },
+                    cookie,
+                )
+
+            actor = public_profile(session)
+            if not store.within_limit(
+                f"announcement-publish:{session.get('auth_source')}:{actor['user_id']}",
+                30,
+                60_000,
+            ):
+                raise BackendError(429, "公告发布过于频繁，请稍后重试")
+            body = await read_body(request)
+            title = body.get("title")
+            content = body.get("content")
+            title = title.strip() if isinstance(title, str) else ""
+            content = content.strip() if isinstance(content, str) else ""
+            if not title or len(title) > 120:
+                raise BackendError(400, "公告标题须为 1 至 120 个字符")
+            if not content or len(content) > 5_000:
+                raise BackendError(400, "公告内容须为 1 至 5000 个字符")
+            row = store.create_announcement(
+                title,
+                content,
+                int(actor["user_id"]),
+                str(actor["username"]),
+            )
+            return success_response(
+                request,
+                request_id,
+                announcement_payload(row),
+                cookie,
+            )
+
+        announcement_match = re.fullmatch(r"/api/announcement-management/(\d+)", path)
+        if announcement_match and request.method in {"PATCH", "DELETE"}:
+            assert_announcement_admin(session)
+            announcement_id = int(announcement_match.group(1))
+            if announcement_id <= 0:
+                raise BackendError(400, "公告 ID 无效")
+            if request.method == "DELETE":
+                store.delete_announcement(announcement_id)
+                return success_response(
+                    request,
+                    request_id,
+                    {"id": announcement_id, "message": "公告已删除"},
+                    cookie,
+                )
+
+            body = await read_body(request)
+            published = body.get("published")
+            if not isinstance(published, bool):
+                raise BackendError(400, "公告发布状态无效")
+            row = store.set_announcement_published(announcement_id, published)
+            return success_response(
+                request,
+                request_id,
+                announcement_payload(row),
+                cookie,
+            )
+
+        if path == "/api/user-mappings" and request.method in {"GET", "POST"}:
+            assert_super_admin(session)
+            if request.method == "GET":
+                rows = store.account_mappings()
+                return success_response(
+                    request,
+                    request_id,
+                    {
+                        "items": [account_mapping_payload(row) for row in rows],
+                        "total": len(rows),
+                    },
+                    cookie,
+                )
+
+            body = await read_body(request)
+            (
+                public_username,
+                upstream_username,
+                display_name,
+                _,
+                account_kind,
+                upstream_user_id,
+            ) = (
+                parse_account_mapping_body(body, require_active=False)
+            )
+            row = store.create_account_mapping(
+                public_username,
+                upstream_username,
+                display_name,
+                account_kind or "primary",
+                upstream_user_id,
+            )
+            return success_response(
+                request,
+                request_id,
+                account_mapping_payload(row),
+                cookie,
+            )
+
+        mapping_match = re.fullmatch(r"/api/user-mappings/([A-Za-z0-9_.-]{3,64})", path)
+        if mapping_match and request.method == "PUT":
+            assert_super_admin(session)
+            body = await read_body(request)
+            (
+                public_username,
+                upstream_username,
+                display_name,
+                active,
+                account_kind,
+                upstream_user_id,
+            ) = (
+                parse_account_mapping_body(body, require_active=True)
+            )
+            row = store.update_account_mapping(
+                mapping_match.group(1),
+                public_username,
+                upstream_username,
+                display_name,
+                active,
+                account_kind,
+                upstream_user_id,
+            )
+            return success_response(
+                request,
+                request_id,
+                account_mapping_payload(row),
+                cookie,
+            )
 
         if path == "/api/auth/password" and request.method == "POST":
             body = await read_body(request)
@@ -1672,8 +2628,26 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 or len(new_password) > 4096
             ):
                 raise BackendError(400, "密码格式不正确")
+            if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+                local_account_id = session.get("local_account_id")
+                if not local_account_id:
+                    raise BackendError(401, "请重新登录账号")
+                store.change_local_password(
+                    int(local_account_id),
+                    old_password,
+                    new_password,
+                )
+                return success_response(
+                    request,
+                    request_id,
+                    {"message": "密码修改成功"},
+                    ("", 0),
+                )
             data = await authorized_json(session, path, method="POST", body=body)
             return success_response(request, request_id, sanitize_data(data), cookie)
+
+        if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+            raise BackendError(403, "超级管理员无权访问此功能")
 
         if path == "/api/sub-accounts" and request.method == "GET":
             if session["role"] not in {"supplier", "admin"}:
@@ -1690,18 +2664,14 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             if session["role"] not in {"supplier", "admin"}:
                 raise BackendError(403, "当前账号无权管理子账号")
             body = await read_body(request)
-            username = body.get("username")
             upstream_username = body.get("gys_username")
             display_name = body.get("display_name")
             password = body.get("password")
-            username = username.strip() if isinstance(username, str) else ""
             upstream_username = (
                 upstream_username.strip() if isinstance(upstream_username, str) else ""
             )
             display_name = display_name.strip() if isinstance(display_name, str) else ""
             password = password if isinstance(password, str) else ""
-            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
-                raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
             if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", upstream_username):
                 raise BackendError(400, "GYS用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
@@ -1714,35 +2684,22 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 or not re.search(r"[^A-Za-z0-9]", password)
             ):
                 raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
-            store.reserve_sub_account_alias(username, upstream_username, display_name)
-            try:
-                data = await authorized_json(
-                    session,
-                    path,
-                    method="POST",
-                    body={
-                        "username": upstream_username,
-                        "display_name": display_name,
-                        "password": password,
-                    },
-                )
-            except Exception:
-                store.release_sub_account_alias(upstream_username)
-                raise
-            created_id: int | None = None
-            if isinstance(data, dict):
-                try:
-                    created_id = int(data.get("id", data.get("user_id")))
-                except (TypeError, ValueError):
-                    created_id = None
-                data = {
-                    **data,
-                    "original_username": upstream_username,
-                    "username": username,
+            data = await authorized_json(
+                session,
+                path,
+                method="POST",
+                body={
+                    "username": upstream_username,
                     "display_name": display_name,
-                }
-            store.attach_sub_account_alias(upstream_username, created_id)
-            return success_response(request, request_id, sanitize_data(data), cookie)
+                    "password": password,
+                },
+            )
+            public_data = (
+                store.publicize_sub_account(data)
+                if isinstance(data, dict)
+                else data
+            )
+            return success_response(request, request_id, sanitize_data(public_data), cookie)
 
         sub_account_match = re.fullmatch(r"/api/sub-accounts/(\d+)", path)
         if sub_account_match and request.method in {"PUT", "DELETE"}:
@@ -1758,14 +2715,10 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 return success_response(request, request_id, sanitize_data(data), cookie)
 
             body = await read_body(request)
-            username = body.get("username")
             display_name = body.get("display_name")
             status = body.get("status")
             password = body.get("password")
-            username = username.strip() if isinstance(username, str) else ""
             display_name = display_name.strip() if isinstance(display_name, str) else ""
-            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
-                raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
                 raise BackendError(400, "请输入有效的显示名")
             if isinstance(status, bool):
@@ -1783,9 +2736,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 ):
                     raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
                 update_body["password"] = password
-            store.assert_sub_account_alias_available(target_id, username)
             data = await authorized_json(session, path, method="PUT", body=update_body)
-            store.rename_sub_account_alias(target_id, username, display_name)
             return success_response(request, request_id, sanitize_data(data), cookie)
 
         rates_match = re.fullmatch(r"/api/sub-accounts/(\d+)/category-rates", path)
