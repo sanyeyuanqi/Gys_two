@@ -306,6 +306,8 @@ const englishTranslations: Record<string, string> = {
   '请求记录': 'Requests',
   '全部分类': 'All Categories',
   '渠道分类模型消耗': 'Model Usage by Channel Category',
+  '渠道分类总消耗': 'Total Usage by Channel Category',
+  '总消耗': 'Total Usage',
   '渠道分类': 'Channel Category',
   '涉及分类': 'Categories',
   '未归属模型': 'Unattributed Model',
@@ -315,6 +317,7 @@ const englishTranslations: Record<string, string> = {
   '全部模型': 'All Models',
   '加载子账号消耗失败': 'Failed to load sub-account usage',
   '正在按分类读取全部模型消耗': 'Loading model usage by category',
+  '正在读取渠道分类总消耗': 'Loading total usage by channel category',
   '该用户暂无匹配标签的渠道消耗': 'No channel usage matches this user’s tags',
   '子账号列表额度为 {{amount}}，与标签查询合计不同。': 'The sub-account list shows {{amount}}, which differs from the tag-based total.',
   '统计口径：标签前缀 {{prefix}}* 仅用于定位用户渠道；分类以原站渠道记录为准，再按实际模型汇总消费日志。': 'Source: the {{prefix}}* tag prefix only locates user channels; categories come from the original channel records, with usage logs grouped by actual model.',
@@ -4069,7 +4072,7 @@ function SubAccountUsageDialog({
       >
         <header className="sub-account-usage-header">
           <div>
-            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('渠道分类模型消耗')}</h2>
+            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('渠道分类总消耗')}</h2>
             <p>{account.display_name || account.username} · {t('本站用户名')} {account.username} · ID {account.id}</p>
           </div>
           <div className="sub-account-usage-tools">
@@ -4089,7 +4092,7 @@ function SubAccountUsageDialog({
           {loading ? (
             <div className="sub-account-usage-state" role="status">
               <Loader2 className="spin" size={25} />
-              <span>{t('正在按分类读取全部模型消耗')}</span>
+              <span>{t('正在读取渠道分类总消耗')}</span>
             </div>
           ) : error ? (
             <div className="sub-account-usage-state error" role="alert">
@@ -4101,8 +4104,8 @@ function SubAccountUsageDialog({
             </div>
           ) : summary && (
             <>
-              <p className="sub-account-usage-category-title">{t('渠道分类')}</p>
-              <div className="sub-account-usage-categories" aria-label={t('渠道分类')} role="group">
+              <p className="sub-account-usage-category-title">{t('渠道分类总消耗')}</p>
+              <div className="sub-account-usage-categories" aria-label={t('渠道分类总消耗')} role="group">
                 {categoryOptions.map((category) => (
                   <button
                     className={categoryFilter === category.key ? 'active' : ''}
@@ -4113,7 +4116,7 @@ function SubAccountUsageDialog({
                   >
                     <span className="sub-account-usage-category-letter">{category.name[0]}</span>
                     <strong>{category.name}</strong>
-                    <small>${category.stats?.amount || '0.0000'}</small>
+                    <small>{t('总消耗')} ${category.stats?.amount || '0.0000'}</small>
                   </button>
                 ))}
               </div>

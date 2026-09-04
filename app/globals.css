@@ -2049,8 +2049,9 @@ textarea:focus {
 }
 
 .sub-account-usage-categories small {
-  color: var(--muted);
-  font-size: 11px;
+  color: var(--blue);
+  font-size: 12px;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
