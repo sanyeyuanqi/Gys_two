@@ -3295,6 +3295,7 @@ function MyChannelsView() {
   const [testProgress, setTestProgress] = useState<{ done: number; total: number } | null>(null);
   const [testError, setTestError] = useState('');
   const [testToast, setTestToast] = useState<{ id: number; text: string } | null>(null);
+  const loadRequestId = useRef(0);
 
   const categoryOptions = useMemo(() => {
     const available = (summary.categories || [])
@@ -3321,6 +3322,7 @@ function MyChannelsView() {
   }, [applyCommonFilters, keyword, status, tag]);
 
   const load = useCallback(async (fresh = false) => {
+    const requestId = ++loadRequestId.current;
     setLoading(true);
     setNotice(null);
 
@@ -3335,13 +3337,14 @@ function MyChannelsView() {
         applyCommonFilters(summaryParams);
         const summaryQuery = summaryParams.toString();
         const [summaryData, tagData, groupData] = await Promise.all([
-          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh }),
+          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh: true }),
           api<string[]>('/api/channels/tags', { fresh }),
           api<{ items?: ChannelGroupSummary[]; total?: number; total_groups?: number }>(
             `/api/channels/tag-summary?${groupParams.toString()}`,
-            { fresh },
+            { fresh: true },
           ),
         ]);
+        if (requestId !== loadRequestId.current) return;
         setSummary(summaryData);
         setTags(tagData);
         setGroups(groupData.items || []);
@@ -3353,22 +3356,24 @@ function MyChannelsView() {
         applyListFilters(summaryParams);
         const summaryQuery = summaryParams.toString();
         const [summaryData, tagData, listData] = await Promise.all([
-          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh }),
+          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh: true }),
           api<string[]>('/api/channels/tags', { fresh }),
-          api<ChannelListData>(`/api/channels?${params.toString()}`, { fresh }),
+          api<ChannelListData>(`/api/channels?${params.toString()}`, { fresh: true }),
         ]);
+        if (requestId !== loadRequestId.current) return;
         setSummary(summaryData);
         setTags(tagData);
         setItems(listData.items || []);
         setListTotal(listData.total || 0);
       }
     } catch (error) {
+      if (requestId !== loadRequestId.current) return;
       setNotice({
         type: 'error',
         text: error instanceof Error ? error.message : t('加载渠道失败'),
       });
     } finally {
-      setLoading(false);
+      if (requestId === loadRequestId.current) setLoading(false);
     }
   }, [applyCommonFilters, applyListFilters, groupPage, listPage, pageSize, t, viewMode]);
 
