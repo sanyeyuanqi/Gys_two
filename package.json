@@ -6,7 +6,10 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "dev": "concurrently -k -n api,web -c green,cyan \"python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload\" \"vinext dev\"",
+    "db:start": "docker compose up -d --wait postgres",
+    "db:stop": "docker compose down",
+    "db:migrate": "python -m backend.migrate_sqlite_to_postgres",
+    "dev": "npm run db:start && concurrently -k -n api,web -c green,cyan \"python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload\" \"vinext dev\"",
     "dev:api": "python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload",
     "dev:web": "vinext dev",
     "setup:backend": "python -m pip install -r backend/requirements.txt",

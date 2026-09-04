@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-gys}
+      POSTGRES_USER: ${POSTGRES_USER:-gys}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gys_local_password}
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - gys_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-gys} -d ${POSTGRES_DB:-gys}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  gys_postgres_data:

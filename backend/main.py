@@ -6,20 +6,26 @@ import json
 import os
 import re
 import secrets
-import sqlite3
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlencode
 from zoneinfo import ZoneInfo
 
 import httpx
+import psycopg
+from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from psycopg.rows import dict_row
+
+
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 
 UPSTREAM_ORIGIN = "https://gys.oljuxj.xyz"
@@ -74,6 +80,41 @@ def decimal_text(value: Decimal) -> str:
     return formatted.rstrip("0").rstrip(".") if "." in formatted else formatted
 
 
+DbRow = dict[str, Any]
+
+
+class PostgresDatabase:
+    def __init__(self, database_url: str) -> None:
+        self.raw = psycopg.connect(
+            database_url,
+            autocommit=True,
+            connect_timeout=10,
+            row_factory=dict_row,
+        )
+
+    @staticmethod
+    def query(sql: str) -> str:
+        return sql.replace("?", "%s")
+
+    def execute(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+        return self.raw.execute(self.query(sql), params)
+
+    def executemany(self, sql: str, params: list[tuple[Any, ...]]) -> None:
+        with self.raw.cursor() as cursor:
+            cursor.executemany(self.query(sql), params)
+
+    @contextmanager
+    def transaction(self) -> Iterator[None]:
+        with self.raw.transaction():
+            yield
+
+    def commit(self) -> None:
+        return
+
+    def rollback(self) -> None:
+        return
+
+
 class BackendError(Exception):
     def __init__(self, status: int, message: str, request_id: str | None = None):
         super().__init__(message)
@@ -84,202 +125,136 @@ class BackendError(Exception):
 
 class SessionStore:
     def __init__(self) -> None:
-        default_dir = Path(__file__).resolve().parent.parent / ".gys-backend"
-        data_dir = Path(os.environ.get("GYS_BACKEND_DATA_DIR", default_dir)).resolve()
-        data_dir.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(
-            data_dir / "sessions.sqlite3",
-            check_same_thread=False,
-            timeout=5,
+        database_url = os.environ.get(
+            "DATABASE_URL",
+            "postgresql://gys:gys_local_password@127.0.0.1:5433/gys",
         )
-        self.connection.row_factory = sqlite3.Row
+        self.connection = PostgresDatabase(database_url)
         self.lock = threading.RLock()
         with self.lock:
-            self.connection.executescript(
-                """
-                PRAGMA journal_mode = WAL;
-                CREATE TABLE IF NOT EXISTS upstream_sessions (
-                    token_hash TEXT PRIMARY KEY,
-                    upstream_user_id INTEGER,
-                    username TEXT,
-                    display_name TEXT,
-                    role TEXT,
-                    cookies TEXT NOT NULL,
-                    authenticated INTEGER NOT NULL DEFAULT 0,
-                    created_at INTEGER NOT NULL,
-                    expires_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_upstream_sessions_expires_at
-                    ON upstream_sessions(expires_at);
-                CREATE TABLE IF NOT EXISTS rate_limits (
-                    name TEXT PRIMARY KEY,
-                    count INTEGER NOT NULL,
-                    expires_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_rate_limits_expires_at
-                    ON rate_limits(expires_at);
-                CREATE TABLE IF NOT EXISTS account_aliases (
-                    public_username TEXT COLLATE NOCASE PRIMARY KEY,
-                    upstream_username TEXT COLLATE NOCASE NOT NULL UNIQUE,
-                    display_name TEXT NOT NULL,
-                    account_kind TEXT NOT NULL DEFAULT 'primary',
-                    upstream_user_id INTEGER,
-                    active INTEGER NOT NULL DEFAULT 1,
-                    created_at INTEGER NOT NULL,
-                    updated_at INTEGER NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS category_exchange_rates (
-                    sub_account_user_id INTEGER NOT NULL,
-                    category TEXT NOT NULL,
-                    rate_percent TEXT NOT NULL DEFAULT '100',
-                    settled_amount TEXT NOT NULL DEFAULT '0',
-                    updated_at INTEGER NOT NULL,
-                    PRIMARY KEY (sub_account_user_id, category)
-                );
-                CREATE TABLE IF NOT EXISTS category_settlement_records (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    sub_account_user_id INTEGER NOT NULL,
-                    category TEXT NOT NULL,
-                    previous_amount TEXT NOT NULL,
-                    settled_amount TEXT NOT NULL,
-                    change_amount TEXT NOT NULL,
-                    rate_percent TEXT NOT NULL,
-                    settlement_amount TEXT NOT NULL DEFAULT '0',
-                    created_at INTEGER NOT NULL
-                );
-                CREATE INDEX IF NOT EXISTS idx_category_settlement_records_account_time
-                    ON category_settlement_records(sub_account_user_id, created_at DESC);
-                """
-            )
-            rate_columns = {
-                str(row["name"])
-                for row in self.connection.execute(
-                    "PRAGMA table_info(category_exchange_rates)"
-                ).fetchall()
-            }
-            if "owner_user_id" in rate_columns:
-                self.connection.executescript(
+            with self.connection.transaction():
+                for statement in (
+                    "CREATE EXTENSION IF NOT EXISTS citext",
                     """
-                    BEGIN IMMEDIATE;
-                    DROP TABLE IF EXISTS category_exchange_rates_by_id;
-                    CREATE TABLE category_exchange_rates_by_id (
-                        sub_account_user_id INTEGER NOT NULL,
+                    CREATE TABLE IF NOT EXISTS upstream_sessions (
+                        token_hash TEXT PRIMARY KEY,
+                        upstream_user_id BIGINT,
+                        username TEXT,
+                        display_name TEXT,
+                        role TEXT,
+                        cookies TEXT NOT NULL,
+                        authenticated SMALLINT NOT NULL DEFAULT 0,
+                        created_at BIGINT NOT NULL,
+                        expires_at BIGINT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_upstream_sessions_expires_at
+                    ON upstream_sessions(expires_at)
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS rate_limits (
+                        name TEXT PRIMARY KEY,
+                        count INTEGER NOT NULL,
+                        expires_at BIGINT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_rate_limits_expires_at
+                    ON rate_limits(expires_at)
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS app_metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS account_aliases (
+                        public_username CITEXT PRIMARY KEY,
+                        upstream_username CITEXT NOT NULL UNIQUE,
+                        display_name TEXT NOT NULL,
+                        account_kind TEXT NOT NULL DEFAULT 'primary',
+                        upstream_user_id BIGINT,
+                        active SMALLINT NOT NULL DEFAULT 1,
+                        created_at BIGINT NOT NULL,
+                        updated_at BIGINT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS category_exchange_rates (
+                        sub_account_user_id BIGINT NOT NULL,
                         category TEXT NOT NULL,
                         rate_percent TEXT NOT NULL DEFAULT '100',
                         settled_amount TEXT NOT NULL DEFAULT '0',
-                        updated_at INTEGER NOT NULL,
+                        updated_at BIGINT NOT NULL,
                         PRIMARY KEY (sub_account_user_id, category)
-                    );
-                    INSERT OR REPLACE INTO category_exchange_rates_by_id
-                        (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
-                    SELECT sub_account_user_id, category, rate_percent, '0', updated_at
-                    FROM category_exchange_rates
-                    ORDER BY updated_at ASC;
-                    DROP TABLE category_exchange_rates;
-                    ALTER TABLE category_exchange_rates_by_id
-                        RENAME TO category_exchange_rates;
-                    COMMIT;
+                    )
+                    """,
                     """
-                )
-            rate_columns = {
-                str(row["name"])
-                for row in self.connection.execute(
-                    "PRAGMA table_info(category_exchange_rates)"
-                ).fetchall()
-            }
-            if "settled_amount" not in rate_columns:
-                self.connection.execute(
+                    CREATE TABLE IF NOT EXISTS category_settlement_records (
+                        id BIGSERIAL PRIMARY KEY,
+                        sub_account_user_id BIGINT NOT NULL,
+                        category TEXT NOT NULL,
+                        previous_amount TEXT NOT NULL,
+                        settled_amount TEXT NOT NULL,
+                        change_amount TEXT NOT NULL,
+                        rate_percent TEXT NOT NULL,
+                        settlement_amount TEXT NOT NULL DEFAULT '0',
+                        created_at BIGINT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_category_settlement_records_account_time
+                    ON category_settlement_records(sub_account_user_id, created_at DESC, id DESC)
+                    """,
+                    """
+                    CREATE INDEX IF NOT EXISTS idx_account_aliases_upstream_user_id
+                    ON account_aliases(upstream_user_id)
+                    """,
+                    """
+                    ALTER TABLE account_aliases
+                    ADD COLUMN IF NOT EXISTS account_kind TEXT NOT NULL DEFAULT 'primary'
+                    """,
+                    """
+                    ALTER TABLE account_aliases
+                    ADD COLUMN IF NOT EXISTS upstream_user_id BIGINT
+                    """,
                     """
                     ALTER TABLE category_exchange_rates
-                    ADD COLUMN settled_amount TEXT NOT NULL DEFAULT '0'
-                    """
-                )
-            settlement_columns = {
-                str(row["name"])
-                for row in self.connection.execute(
-                    "PRAGMA table_info(category_settlement_records)"
-                ).fetchall()
-            }
-            if "settlement_amount" not in settlement_columns:
-                self.connection.execute(
+                    ADD COLUMN IF NOT EXISTS settled_amount TEXT NOT NULL DEFAULT '0'
+                    """,
                     """
                     ALTER TABLE category_settlement_records
-                    ADD COLUMN settlement_amount TEXT NOT NULL DEFAULT '0'
-                    """
-                )
-                legacy_records = self.connection.execute(
-                    """
-                    SELECT id, change_amount, rate_percent
-                    FROM category_settlement_records
-                    """
-                ).fetchall()
-                settlement_updates = []
-                for record in legacy_records:
-                    try:
-                        consumption = Decimal(str(record["change_amount"]))
-                        rate = Decimal(str(record["rate_percent"]))
-                    except (InvalidOperation, TypeError, ValueError):
-                        continue
-                    if not consumption.is_finite() or not rate.is_finite():
-                        continue
-                    settlement_updates.append(
-                        (
-                            decimal_text(consumption * rate / Decimal(100)),
-                            int(record["id"]),
-                        )
-                    )
-                if settlement_updates:
-                    self.connection.executemany(
-                        """
-                        UPDATE category_settlement_records
-                        SET settlement_amount = ?
-                        WHERE id = ?
-                        """,
-                        settlement_updates,
-                    )
-            alias_columns = {
-                str(row["name"])
-                for row in self.connection.execute("PRAGMA table_info(account_aliases)").fetchall()
-            }
-            if "account_kind" not in alias_columns:
-                self.connection.execute(
-                    "ALTER TABLE account_aliases ADD COLUMN account_kind TEXT NOT NULL DEFAULT 'primary'"
-                )
-            if "upstream_user_id" not in alias_columns:
-                self.connection.execute(
-                    "ALTER TABLE account_aliases ADD COLUMN upstream_user_id INTEGER"
-                )
-            self.connection.execute(
-                "CREATE INDEX IF NOT EXISTS idx_account_aliases_upstream_user_id "
-                "ON account_aliases(upstream_user_id)"
-            )
-            now = int(time.time() * 1000)
-            self.connection.executemany(
-                """
-                INSERT INTO account_aliases
-                    (public_username, upstream_username, display_name, account_kind,
-                     active, created_at, updated_at)
-                VALUES (?, ?, ?, 'primary', 1, ?, ?)
-                ON CONFLICT(public_username) DO UPDATE SET
-                    upstream_username = excluded.upstream_username,
-                    display_name = excluded.display_name,
-                    account_kind = 'primary',
-                    active = 1,
-                    updated_at = excluded.updated_at
-                """,
-                [(*mapping, now, now) for mapping in DEFAULT_ACCOUNT_ALIASES],
-            )
-            for public_username, upstream_username, display_name in DEFAULT_ACCOUNT_ALIASES:
-                self.connection.execute(
-                    """
-                    UPDATE upstream_sessions
-                    SET username = ?, display_name = ?
-                    WHERE role IN ('admin', 'supplier') AND username = ?
+                    ADD COLUMN IF NOT EXISTS settlement_amount TEXT NOT NULL DEFAULT '0'
                     """,
-                    (public_username, display_name, upstream_username),
+                ):
+                    self.connection.execute(statement)
+                now = int(time.time() * 1000)
+                self.connection.executemany(
+                    """
+                    INSERT INTO account_aliases
+                        (public_username, upstream_username, display_name, account_kind,
+                         active, created_at, updated_at)
+                    VALUES (?, ?, ?, 'primary', 1, ?, ?)
+                    ON CONFLICT(public_username) DO UPDATE SET
+                        upstream_username = excluded.upstream_username,
+                        display_name = excluded.display_name,
+                        account_kind = 'primary',
+                        active = 1,
+                        updated_at = excluded.updated_at
+                    """,
+                    [(*mapping, now, now) for mapping in DEFAULT_ACCOUNT_ALIASES],
                 )
-            self.connection.execute("PRAGMA optimize")
-            self.connection.commit()
+                for public_username, upstream_username, display_name in DEFAULT_ACCOUNT_ALIASES:
+                    self.connection.execute(
+                        """
+                        UPDATE upstream_sessions
+                        SET username = ?, display_name = ?
+                        WHERE role IN ('admin', 'supplier') AND username = ?
+                        """,
+                        (public_username, display_name, upstream_username),
+                    )
 
     @staticmethod
     def token_hash(token: str) -> str:
@@ -289,7 +264,7 @@ class SessionStore:
         self,
         profile: dict[str, Any] | None = None,
         cookies: str = "[]",
-    ) -> tuple[str, sqlite3.Row]:
+    ) -> tuple[str, DbRow]:
         token = secrets.token_urlsafe(32)
         now = int(time.time() * 1000)
         parsed = validate_profile(profile) if profile else None
@@ -307,25 +282,28 @@ class SessionStore:
             now + lifetime,
         )
         with self.lock:
-            self.connection.execute("DELETE FROM upstream_sessions WHERE expires_at <= ?", (now,))
-            self.connection.execute(
-                """
-                INSERT INTO upstream_sessions
-                    (token_hash, upstream_user_id, username, display_name, role,
-                     cookies, authenticated, created_at, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                values,
-            )
-            self.connection.commit()
-            row = self.connection.execute(
-                "SELECT * FROM upstream_sessions WHERE token_hash = ?", (values[0],)
-            ).fetchone()
+            with self.connection.transaction():
+                self.connection.execute(
+                    "DELETE FROM upstream_sessions WHERE expires_at <= ?",
+                    (now,),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO upstream_sessions
+                        (token_hash, upstream_user_id, username, display_name, role,
+                         cookies, authenticated, created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                row = self.connection.execute(
+                    "SELECT * FROM upstream_sessions WHERE token_hash = ?", (values[0],)
+                ).fetchone()
         if row is None:
             raise BackendError(503, "会话服务暂时不可用")
         return token, row
 
-    def get_session(self, token: str) -> sqlite3.Row | None:
+    def get_session(self, token: str) -> DbRow | None:
         if not re.fullmatch(r"[A-Za-z0-9_-]{43}", token or ""):
             return None
         now = int(time.time() * 1000)
@@ -338,7 +316,7 @@ class SessionStore:
             return None
         return row
 
-    def current(self, session: sqlite3.Row) -> sqlite3.Row:
+    def current(self, session: DbRow) -> DbRow:
         with self.lock:
             row = self.connection.execute(
                 "SELECT * FROM upstream_sessions WHERE token_hash = ?",
@@ -346,7 +324,7 @@ class SessionStore:
             ).fetchone()
         return row or session
 
-    def save_cookies(self, session: sqlite3.Row, cookies: str) -> None:
+    def save_cookies(self, session: DbRow, cookies: str) -> None:
         with self.lock:
             self.connection.execute(
                 "UPDATE upstream_sessions SET cookies = ? WHERE token_hash = ?",
@@ -354,7 +332,7 @@ class SessionStore:
             )
             self.connection.commit()
 
-    def save_profile(self, session: sqlite3.Row, profile: dict[str, Any]) -> dict[str, Any]:
+    def save_profile(self, session: DbRow, profile: dict[str, Any]) -> dict[str, Any]:
         parsed = self.publicize_profile(profile)
         with self.lock:
             self.connection.execute(
@@ -423,29 +401,29 @@ class SessionStore:
     ) -> None:
         now = int(time.time() * 1000)
         with self.lock:
-            conflict = self.connection.execute(
-                """
-                SELECT 1 FROM account_aliases
-                WHERE active = 1 AND (public_username = ? OR upstream_username = ?)
-                """,
-                (public_username, upstream_username),
-            ).fetchone()
-            if conflict is not None:
-                raise BackendError(409, "本站用户名已存在")
-            self.connection.execute(
-                "DELETE FROM account_aliases WHERE active = 0 AND public_username = ?",
-                (public_username,),
-            )
-            self.connection.execute(
-                """
-                INSERT INTO account_aliases
-                    (public_username, upstream_username, display_name, account_kind,
-                     upstream_user_id, active, created_at, updated_at)
-                VALUES (?, ?, ?, 'sub', NULL, 1, ?, ?)
-                """,
-                (public_username, upstream_username, display_name, now, now),
-            )
-            self.connection.commit()
+            with self.connection.transaction():
+                conflict = self.connection.execute(
+                    """
+                    SELECT 1 FROM account_aliases
+                    WHERE active = 1 AND (public_username = ? OR upstream_username = ?)
+                    """,
+                    (public_username, upstream_username),
+                ).fetchone()
+                if conflict is not None:
+                    raise BackendError(409, "本站用户名已存在")
+                self.connection.execute(
+                    "DELETE FROM account_aliases WHERE active = 0 AND public_username = ?",
+                    (public_username,),
+                )
+                self.connection.execute(
+                    """
+                    INSERT INTO account_aliases
+                        (public_username, upstream_username, display_name, account_kind,
+                         upstream_user_id, active, created_at, updated_at)
+                    VALUES (?, ?, ?, 'sub', NULL, 1, ?, ?)
+                    """,
+                    (public_username, upstream_username, display_name, now, now),
+                )
 
     def release_sub_account_alias(self, upstream_username: str) -> None:
         with self.lock:
@@ -482,52 +460,65 @@ class SessionStore:
         display_name = display_name.strip() if isinstance(display_name, str) else upstream_username
         now = int(time.time() * 1000)
         with self.lock:
-            alias = self.connection.execute(
-                """
-                SELECT public_username, display_name
-                FROM account_aliases
-                WHERE upstream_username = ? AND active = 1
-                """,
-                (upstream_username,),
-            ).fetchone()
-            if alias is None:
-                base = f"sub_{upstream_user_id}"
-                public_username = base
-                suffix = 2
-                while self.connection.execute(
-                    "SELECT 1 FROM account_aliases WHERE public_username = ? AND active = 1",
-                    (public_username,),
-                ).fetchone() is not None:
-                    public_username = f"{base}_{suffix}"
-                    suffix += 1
+            with self.connection.transaction():
                 self.connection.execute(
                     """
-                    INSERT INTO account_aliases
-                        (public_username, upstream_username, display_name, account_kind,
-                         upstream_user_id, active, created_at, updated_at)
-                    VALUES (?, ?, ?, 'sub', ?, 1, ?, ?)
+                    SELECT pg_advisory_xact_lock(hashtextextended(?, 0))
                     """,
-                    (public_username, upstream_username, display_name, upstream_user_id, now, now),
+                    (f"sub-account-alias:{upstream_username}",),
                 )
-                alias = {"public_username": public_username, "display_name": display_name}
-            else:
+                alias = self.connection.execute(
+                    """
+                    SELECT public_username, display_name
+                    FROM account_aliases
+                    WHERE upstream_username = ? AND active = 1
+                    """,
+                    (upstream_username,),
+                ).fetchone()
+                if alias is None:
+                    base = f"sub_{upstream_user_id}"
+                    public_username = base
+                    suffix = 2
+                    while self.connection.execute(
+                        "SELECT 1 FROM account_aliases WHERE public_username = ? AND active = 1",
+                        (public_username,),
+                    ).fetchone() is not None:
+                        public_username = f"{base}_{suffix}"
+                        suffix += 1
+                    self.connection.execute(
+                        """
+                        INSERT INTO account_aliases
+                            (public_username, upstream_username, display_name, account_kind,
+                             upstream_user_id, active, created_at, updated_at)
+                        VALUES (?, ?, ?, 'sub', ?, 1, ?, ?)
+                        """,
+                        (
+                            public_username,
+                            upstream_username,
+                            display_name,
+                            upstream_user_id,
+                            now,
+                            now,
+                        ),
+                    )
+                    alias = {"public_username": public_username, "display_name": display_name}
+                else:
+                    self.connection.execute(
+                        """
+                        UPDATE account_aliases
+                        SET upstream_user_id = COALESCE(upstream_user_id, ?), updated_at = ?
+                        WHERE upstream_username = ?
+                        """,
+                        (upstream_user_id, now, upstream_username),
+                    )
                 self.connection.execute(
                     """
-                    UPDATE account_aliases
-                    SET upstream_user_id = COALESCE(upstream_user_id, ?), updated_at = ?
-                    WHERE upstream_username = ?
+                    UPDATE upstream_sessions
+                    SET username = ?, display_name = ?
+                    WHERE role = 'sub' AND username = ?
                     """,
-                    (upstream_user_id, now, upstream_username),
+                    (alias["public_username"], alias["display_name"], upstream_username),
                 )
-            self.connection.execute(
-                """
-                UPDATE upstream_sessions
-                SET username = ?, display_name = ?
-                WHERE role = 'sub' AND username = ?
-                """,
-                (alias["public_username"], alias["display_name"], upstream_username),
-            )
-            self.connection.commit()
         return {
             **item,
             "original_username": upstream_username,
@@ -559,42 +550,48 @@ class SessionStore:
     ) -> None:
         now = int(time.time() * 1000)
         with self.lock:
-            current = self.connection.execute(
-                """
-                SELECT public_username, upstream_username
-                FROM account_aliases
-                WHERE account_kind = 'sub' AND upstream_user_id = ? AND active = 1
-                """,
-                (upstream_user_id,),
-            ).fetchone()
-            if current is None:
-                raise BackendError(404, "子账号映射不存在，请刷新后重试")
-            conflict = self.connection.execute(
-                """
-                SELECT 1 FROM account_aliases
-                WHERE public_username = ? AND public_username <> ? AND active = 1
-                """,
-                (public_username, current["public_username"]),
-            ).fetchone()
-            if conflict is not None:
-                raise BackendError(409, "本站用户名已存在")
-            self.connection.execute(
-                """
-                UPDATE account_aliases
-                SET public_username = ?, display_name = ?, updated_at = ?
-                WHERE account_kind = 'sub' AND upstream_user_id = ?
-                """,
-                (public_username, display_name, now, upstream_user_id),
-            )
-            self.connection.execute(
-                """
-                UPDATE upstream_sessions
-                SET username = ?, display_name = ?
-                WHERE role = 'sub' AND username IN (?, ?)
-                """,
-                (public_username, display_name, current["public_username"], current["upstream_username"]),
-            )
-            self.connection.commit()
+            with self.connection.transaction():
+                current = self.connection.execute(
+                    """
+                    SELECT public_username, upstream_username
+                    FROM account_aliases
+                    WHERE account_kind = 'sub' AND upstream_user_id = ? AND active = 1
+                    FOR UPDATE
+                    """,
+                    (upstream_user_id,),
+                ).fetchone()
+                if current is None:
+                    raise BackendError(404, "子账号映射不存在，请刷新后重试")
+                conflict = self.connection.execute(
+                    """
+                    SELECT 1 FROM account_aliases
+                    WHERE public_username = ? AND public_username <> ? AND active = 1
+                    """,
+                    (public_username, current["public_username"]),
+                ).fetchone()
+                if conflict is not None:
+                    raise BackendError(409, "本站用户名已存在")
+                self.connection.execute(
+                    """
+                    UPDATE account_aliases
+                    SET public_username = ?, display_name = ?, updated_at = ?
+                    WHERE account_kind = 'sub' AND upstream_user_id = ?
+                    """,
+                    (public_username, display_name, now, upstream_user_id),
+                )
+                self.connection.execute(
+                    """
+                    UPDATE upstream_sessions
+                    SET username = ?, display_name = ?
+                    WHERE role = 'sub' AND username IN (?, ?)
+                    """,
+                    (
+                        public_username,
+                        display_name,
+                        current["public_username"],
+                        current["upstream_username"],
+                    ),
+                )
 
     def assert_sub_account_alias_available(self, upstream_user_id: int, public_username: str) -> None:
         with self.lock:
@@ -689,7 +686,7 @@ class SessionStore:
                 )
             )
         with self.lock:
-            try:
+            with self.connection.transaction():
                 self.connection.executemany(
                     """
                     INSERT INTO category_exchange_rates
@@ -701,10 +698,6 @@ class SessionStore:
                     """,
                     values,
                 )
-                self.connection.commit()
-            except Exception:
-                self.connection.rollback()
-                raise
 
     def record_settlement(
         self,
@@ -715,40 +708,52 @@ class SessionStore:
     ) -> dict[str, Any]:
         now = int(time.time() * 1000)
         with self.lock:
-            row = self.connection.execute(
-                """
-                SELECT rate_percent, settled_amount
-                FROM category_exchange_rates
-                WHERE sub_account_user_id = ? AND category = ?
-                """,
-                (sub_account_user_id, category),
-            ).fetchone()
-            rate = Decimal("100")
-            previous = Decimal(0)
-            if row is not None:
-                try:
-                    stored_rate = Decimal(str(row["rate_percent"]))
-                    if stored_rate.is_finite() and Decimal(0) <= stored_rate <= Decimal("100000"):
-                        rate = stored_rate
-                except (InvalidOperation, TypeError, ValueError):
-                    pass
-                try:
-                    stored_settled = Decimal(str(row["settled_amount"]))
-                    if stored_settled.is_finite() and stored_settled >= 0:
-                        previous = stored_settled
-                except (InvalidOperation, TypeError, ValueError):
-                    pass
-            available = max(Decimal(0), total_usage_amount - previous)
-            if consumption_amount <= 0:
-                raise BackendError(400, "本次结算消耗额度必须大于 0")
-            if consumption_amount > available:
-                raise BackendError(
-                    409,
-                    f"本次结算消耗额度不能超过可结算额度 ${dollar_amount(available)}",
+            with self.connection.transaction():
+                self.connection.execute(
+                    """
+                    SELECT pg_advisory_xact_lock(
+                        hashtextextended(CAST(? AS text) || ':' || ?, 0)
+                    )
+                    """,
+                    (sub_account_user_id, category),
                 )
-            settled = previous + consumption_amount
-            settlement_amount = consumption_amount * rate / Decimal(100)
-            try:
+                row = self.connection.execute(
+                    """
+                    SELECT rate_percent, settled_amount
+                    FROM category_exchange_rates
+                    WHERE sub_account_user_id = ? AND category = ?
+                    FOR UPDATE
+                    """,
+                    (sub_account_user_id, category),
+                ).fetchone()
+                rate = Decimal("100")
+                previous = Decimal(0)
+                if row is not None:
+                    try:
+                        stored_rate = Decimal(str(row["rate_percent"]))
+                        if (
+                            stored_rate.is_finite()
+                            and Decimal(0) <= stored_rate <= Decimal("100000")
+                        ):
+                            rate = stored_rate
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
+                    try:
+                        stored_settled = Decimal(str(row["settled_amount"]))
+                        if stored_settled.is_finite() and stored_settled >= 0:
+                            previous = stored_settled
+                    except (InvalidOperation, TypeError, ValueError):
+                        pass
+                available = max(Decimal(0), total_usage_amount - previous)
+                if consumption_amount <= 0:
+                    raise BackendError(400, "本次结算消耗额度必须大于 0")
+                if consumption_amount > available:
+                    raise BackendError(
+                        409,
+                        f"本次结算消耗额度不能超过可结算额度 ${dollar_amount(available)}",
+                    )
+                settled = previous + consumption_amount
+                settlement_amount = consumption_amount * rate / Decimal(100)
                 self.connection.execute(
                     """
                     INSERT INTO category_exchange_rates
@@ -772,6 +777,7 @@ class SessionStore:
                         (sub_account_user_id, category, previous_amount, settled_amount,
                          change_amount, rate_percent, settlement_amount, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    RETURNING id
                     """,
                     (
                         sub_account_user_id,
@@ -784,11 +790,10 @@ class SessionStore:
                         now,
                     ),
                 )
-                record_id = int(cursor.lastrowid)
-                self.connection.commit()
-            except Exception:
-                self.connection.rollback()
-                raise
+                inserted = cursor.fetchone()
+                if inserted is None:
+                    raise BackendError(503, "结算记录保存失败")
+                record_id = int(inserted["id"])
         return {
             "id": record_id,
             "category": category,
@@ -822,7 +827,7 @@ class SessionStore:
 
     def delete_category_rates(self, sub_account_user_id: int) -> None:
         with self.lock:
-            try:
+            with self.connection.transaction():
                 self.connection.execute(
                     """
                     DELETE FROM category_exchange_rates
@@ -837,12 +842,8 @@ class SessionStore:
                     """,
                     (sub_account_user_id,),
                 )
-                self.connection.commit()
-            except Exception:
-                self.connection.rollback()
-                raise
 
-    def touch(self, session: sqlite3.Row) -> int:
+    def touch(self, session: DbRow) -> int:
         now = int(time.time() * 1000)
         expires_at = min(int(session["created_at"]) + 30 * DAY_MS, now + 7 * DAY_MS)
         with self.lock:
@@ -853,7 +854,7 @@ class SessionStore:
             self.connection.commit()
         return max(0, (expires_at - now) // 1000)
 
-    def delete(self, session: sqlite3.Row | None) -> None:
+    def delete(self, session: DbRow | None) -> None:
         if session is None:
             return
         with self.lock:
@@ -867,25 +868,30 @@ class SessionStore:
         key = self.token_hash(name)
         now = int(time.time() * 1000)
         with self.lock:
-            row = self.connection.execute(
-                "SELECT count, expires_at FROM rate_limits WHERE name = ?", (key,)
-            ).fetchone()
-            if row is None or int(row["expires_at"]) <= now:
+            with self.connection.transaction():
                 self.connection.execute(
-                    """
-                    INSERT INTO rate_limits (name, count, expires_at) VALUES (?, 1, ?)
-                    ON CONFLICT(name) DO UPDATE SET count = 1, expires_at = excluded.expires_at
-                    """,
-                    (key, now + window_ms),
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                    (f"rate-limit:{key}",),
                 )
-                allowed = True
-            else:
-                next_count = int(row["count"]) + 1
-                self.connection.execute(
-                    "UPDATE rate_limits SET count = ? WHERE name = ?", (next_count, key)
-                )
-                allowed = next_count <= maximum
-            self.connection.commit()
+                row = self.connection.execute(
+                    "SELECT count, expires_at FROM rate_limits WHERE name = ? FOR UPDATE",
+                    (key,),
+                ).fetchone()
+                if row is None or int(row["expires_at"]) <= now:
+                    self.connection.execute(
+                        """
+                        INSERT INTO rate_limits (name, count, expires_at) VALUES (?, 1, ?)
+                        ON CONFLICT(name) DO UPDATE SET count = 1, expires_at = excluded.expires_at
+                        """,
+                        (key, now + window_ms),
+                    )
+                    allowed = True
+                else:
+                    next_count = int(row["count"]) + 1
+                    self.connection.execute(
+                        "UPDATE rate_limits SET count = ? WHERE name = ?", (next_count, key)
+                    )
+                    allowed = next_count <= maximum
         return allowed
 
 
@@ -968,7 +974,7 @@ def validate_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def public_profile(session: sqlite3.Row) -> dict[str, Any]:
+def public_profile(session: DbRow) -> dict[str, Any]:
     if not session["authenticated"] or not session["upstream_user_id"]:
         raise BackendError(401, "请登录原 GYS 账号")
     return {
@@ -1026,7 +1032,7 @@ def category_rates_payload(
     }
 
 
-def settlement_record_payload(record: dict[str, Any] | sqlite3.Row) -> dict[str, Any]:
+def settlement_record_payload(record: DbRow) -> dict[str, Any]:
     consumption_amount = Decimal(str(record["change_amount"]))
     return {
         "id": int(record["id"]),
@@ -1041,7 +1047,7 @@ def settlement_record_payload(record: dict[str, Any] | sqlite3.Row) -> dict[str,
     }
 
 
-async def channel_model_usage(session: sqlite3.Row, channel_id: int) -> dict[str, Any]:
+async def channel_model_usage(session: DbRow, channel_id: int) -> dict[str, Any]:
     page = 1
     loaded = 0
     models: dict[str, dict[str, Any]] = {}
@@ -1094,7 +1100,7 @@ async def channel_model_usage(session: sqlite3.Row, channel_id: int) -> dict[str
 
 
 async def sub_account_tag_usage(
-    session: sqlite3.Row,
+    session: DbRow,
     target_id: int,
     requested_category: str | None,
 ) -> dict[str, Any]:
@@ -1366,7 +1372,7 @@ def is_unauthorized(response: httpx.Response, payload: Any) -> bool:
 
 
 async def upstream_raw(
-    session: sqlite3.Row,
+    session: DbRow,
     path: str,
     *,
     method: str = "GET",
@@ -1410,7 +1416,7 @@ async def upstream_raw(
 
 
 async def upstream_json(
-    session: sqlite3.Row,
+    session: DbRow,
     path: str,
     *,
     method: str = "GET",
@@ -1421,7 +1427,7 @@ async def upstream_json(
 
 
 async def authorized_json(
-    session: sqlite3.Row,
+    session: DbRow,
     path: str,
     *,
     method: str = "GET",

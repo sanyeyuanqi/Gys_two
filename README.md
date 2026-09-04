@@ -7,11 +7,13 @@
 ## 数据边界
 
 - 原 GYS 是唯一业务数据源。
-- FastAPI 使用本地 SQLite，只保存后台会话、原站 Cookie 和限流计数。
+- FastAPI 使用 PostgreSQL，保存后台会话、原站 Cookie、账号映射、汇率与结算记录。
 - 不在本地数据库复制渠道、用量、子账号或 API Key 业务记录。
 - 不保存用户密码；原站会话失效后需要重新登录。
 
 ## 本地运行
+
+请先启动 Docker Desktop，然后执行：
 
 ```bash
 npm install
@@ -19,18 +21,41 @@ npm run setup:backend
 npm run dev
 ```
 
-`npm run dev` 会同时启动：
+`npm run dev` 会启动 PostgreSQL，并同时运行：
 
+- PostgreSQL：`127.0.0.1:5433`
 - FastAPI：`http://127.0.0.1:8000`（接口文档：`/backend/docs`）
 - 前端：默认 `http://localhost:3000`；端口占用时会自动顺延
 
-登录时请使用原 GYS 账号。会话数据库保存在 `.gys-backend/`，不会提交到 Git。
+数据库默认连接地址为：
+
+```text
+postgresql://gys:gys_local_password@127.0.0.1:5433/gys
+```
+
+如需自定义账号、密码或端口，请复制 `.env.example` 为 `.env` 并修改对应变量。
+PostgreSQL 数据保存在 Docker 数据卷 `gys_postgres_data` 中，停止应用后仍会保留。
+
+如果项目原来使用过 SQLite，可在 PostgreSQL 启动后执行一次：
+
+```bash
+npm run db:migrate
+```
+
+迁移会读取 `.gys-backend/sessions.sqlite3`，保留原文件并把账号映射、汇率、结算记录和仍有效的登录会话复制到 PostgreSQL。重复执行不会生成重复记录。
 
 ## 单独启动
 
 ```bash
+npm run db:start
 npm run dev:api
 npm run dev:web
+```
+
+停止数据库：
+
+```bash
+npm run db:stop
 ```
 
 线上部署前需要把 FastAPI 部署到可访问的 Python 服务器，并设置
