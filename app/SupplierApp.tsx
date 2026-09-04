@@ -636,10 +636,13 @@ const englishTranslations: Record<string, string> = {
   '编辑 {{name}}': 'Edit {{name}}',
   '删除 {{name}}': 'Delete {{name}}',
   '请输入用户名': 'Enter a username',
+  '请输入GYS用户名': 'Enter a GYS username',
   '本站用户名': 'Site Username',
   'GYS用户名': 'GYS Username',
   '本站登录用户名': 'Username for this site',
+  'GYS登录用户名': 'Username on GYS',
   '本站用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
+  'GYS用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores for the GYS username',
   '请输入显示名': 'Enter a display name',
   '登录用户名': 'Login username',
   '显示名称': 'Display name',
@@ -4706,6 +4709,7 @@ function CreateSubAccountDialog({
 }) {
   const { t } = useLanguage();
   const [username, setUsername] = useState('');
+  const [gysUsername, setGysUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -4715,6 +4719,7 @@ function CreateSubAccountDialog({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const cleanUsername = username.trim();
+    const cleanGysUsername = gysUsername.trim();
     const cleanDisplayName = displayName.trim();
     if (!cleanUsername) {
       setError(t('请输入用户名'));
@@ -4722,6 +4727,14 @@ function CreateSubAccountDialog({
     }
     if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanUsername)) {
       setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
+      return;
+    }
+    if (!cleanGysUsername) {
+      setError(t('请输入GYS用户名'));
+      return;
+    }
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanGysUsername)) {
+      setError(t('GYS用户名须为3至64位字母、数字、点、横线或下划线'));
       return;
     }
     if (!cleanDisplayName) {
@@ -4739,6 +4752,7 @@ function CreateSubAccountDialog({
         method: 'POST',
         body: {
           username: cleanUsername,
+          gys_username: cleanGysUsername,
           display_name: cleanDisplayName,
           password,
         },
@@ -4784,6 +4798,19 @@ function CreateSubAccountDialog({
               placeholder={t('本站登录用户名')}
               required
               value={username}
+            />
+          </label>
+          <label>
+            <span>{t('GYS用户名')}</span>
+            <input
+              autoComplete="off"
+              maxLength={64}
+              minLength={3}
+              onChange={event => setGysUsername(event.target.value)}
+              pattern="[A-Za-z0-9_.-]{3,64}"
+              placeholder={t('GYS登录用户名')}
+              required
+              value={gysUsername}
             />
           </label>
           <label>

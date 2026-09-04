@@ -405,12 +405,21 @@ class SessionStore:
                 conflict = self.connection.execute(
                     """
                     SELECT 1 FROM account_aliases
-                    WHERE active = 1 AND (public_username = ? OR upstream_username = ?)
+                    WHERE active = 1
+                      AND (
+                        public_username IN (?, ?)
+                        OR upstream_username IN (?, ?)
+                      )
                     """,
-                    (public_username, upstream_username),
+                    (
+                        public_username,
+                        upstream_username,
+                        public_username,
+                        upstream_username,
+                    ),
                 ).fetchone()
                 if conflict is not None:
-                    raise BackendError(409, "本站用户名已存在")
+                    raise BackendError(409, "本站用户名或GYS用户名已存在")
                 self.connection.execute(
                     "DELETE FROM account_aliases WHERE active = 0 AND public_username = ?",
                     (public_username,),
@@ -1679,13 +1688,19 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(403, "当前账号无权管理子账号")
             body = await read_body(request)
             username = body.get("username")
+            upstream_username = body.get("gys_username")
             display_name = body.get("display_name")
             password = body.get("password")
             username = username.strip() if isinstance(username, str) else ""
+            upstream_username = (
+                upstream_username.strip() if isinstance(upstream_username, str) else ""
+            )
             display_name = display_name.strip() if isinstance(display_name, str) else ""
             password = password if isinstance(password, str) else ""
             if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
                 raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", upstream_username):
+                raise BackendError(400, "GYS用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
                 raise BackendError(400, "请输入有效的显示名")
             if (
@@ -1696,7 +1711,6 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 or not re.search(r"[^A-Za-z0-9]", password)
             ):
                 raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
-            upstream_username = f"gys{secrets.token_hex(10)}"
             store.reserve_sub_account_alias(username, upstream_username, display_name)
             try:
                 data = await authorized_json(
