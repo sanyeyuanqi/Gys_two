@@ -124,16 +124,43 @@ class SessionStore:
                     updated_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS category_exchange_rates (
-                    owner_user_id INTEGER NOT NULL,
                     sub_account_user_id INTEGER NOT NULL,
                     category TEXT NOT NULL,
                     rate_percent TEXT NOT NULL DEFAULT '100',
                     updated_at INTEGER NOT NULL,
-                    PRIMARY KEY (owner_user_id, sub_account_user_id, category)
+                    PRIMARY KEY (sub_account_user_id, category)
                 );
-                DROP INDEX IF EXISTS idx_category_exchange_rates_account;
                 """
             )
+            rate_columns = {
+                str(row["name"])
+                for row in self.connection.execute(
+                    "PRAGMA table_info(category_exchange_rates)"
+                ).fetchall()
+            }
+            if "owner_user_id" in rate_columns:
+                self.connection.executescript(
+                    """
+                    BEGIN IMMEDIATE;
+                    DROP TABLE IF EXISTS category_exchange_rates_by_id;
+                    CREATE TABLE category_exchange_rates_by_id (
+                        sub_account_user_id INTEGER NOT NULL,
+                        category TEXT NOT NULL,
+                        rate_percent TEXT NOT NULL DEFAULT '100',
+                        updated_at INTEGER NOT NULL,
+                        PRIMARY KEY (sub_account_user_id, category)
+                    );
+                    INSERT OR REPLACE INTO category_exchange_rates_by_id
+                        (sub_account_user_id, category, rate_percent, updated_at)
+                    SELECT sub_account_user_id, category, rate_percent, updated_at
+                    FROM category_exchange_rates
+                    ORDER BY updated_at ASC;
+                    DROP TABLE category_exchange_rates;
+                    ALTER TABLE category_exchange_rates_by_id
+                        RENAME TO category_exchange_rates;
+                    COMMIT;
+                    """
+                )
             alias_columns = {
                 str(row["name"])
                 for row in self.connection.execute("PRAGMA table_info(account_aliases)").fetchall()
@@ -523,15 +550,15 @@ class SessionStore:
             )
             self.connection.commit()
 
-    def category_rates(self, owner_user_id: int, sub_account_user_id: int) -> dict[str, Decimal]:
+    def category_rates(self, sub_account_user_id: int) -> dict[str, Decimal]:
         with self.lock:
             rows = self.connection.execute(
                 """
                 SELECT category, rate_percent
                 FROM category_exchange_rates
-                WHERE owner_user_id = ? AND sub_account_user_id = ?
+                WHERE sub_account_user_id = ?
                 """,
-                (owner_user_id, sub_account_user_id),
+                (sub_account_user_id,),
             ).fetchall()
         rates = {category: Decimal("100") for category in CHANNEL_USAGE_CATEGORIES}
         for row in rows:
@@ -548,7 +575,6 @@ class SessionStore:
 
     def save_category_rates(
         self,
-        owner_user_id: int,
         sub_account_user_id: int,
         rates: dict[str, Decimal],
     ) -> None:
@@ -558,14 +584,14 @@ class SessionStore:
             formatted = format(rates[category], "f")
             if "." in formatted:
                 formatted = formatted.rstrip("0").rstrip(".")
-            values.append((owner_user_id, sub_account_user_id, category, formatted, now))
+            values.append((sub_account_user_id, category, formatted, now))
         with self.lock:
             self.connection.executemany(
                 """
                 INSERT INTO category_exchange_rates
-                    (owner_user_id, sub_account_user_id, category, rate_percent, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(owner_user_id, sub_account_user_id, category) DO UPDATE SET
+                    (sub_account_user_id, category, rate_percent, updated_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(sub_account_user_id, category) DO UPDATE SET
                     rate_percent = excluded.rate_percent,
                     updated_at = excluded.updated_at
                 """,
@@ -573,14 +599,14 @@ class SessionStore:
             )
             self.connection.commit()
 
-    def delete_category_rates(self, owner_user_id: int, sub_account_user_id: int) -> None:
+    def delete_category_rates(self, sub_account_user_id: int) -> None:
         with self.lock:
             self.connection.execute(
                 """
                 DELETE FROM category_exchange_rates
-                WHERE owner_user_id = ? AND sub_account_user_id = ?
+                WHERE sub_account_user_id = ?
                 """,
-                (owner_user_id, sub_account_user_id),
+                (sub_account_user_id,),
             )
             self.connection.commit()
 
@@ -750,10 +776,9 @@ def decimal_text(value: Decimal) -> str:
 
 
 def category_rates_payload(
-    owner_user_id: int,
     sub_account_user_id: int,
 ) -> dict[str, Any]:
-    rates = store.category_rates(owner_user_id, sub_account_user_id)
+    rates = store.category_rates(sub_account_user_id)
     return {
         "userId": sub_account_user_id,
         "rates": [
@@ -824,11 +849,7 @@ async def sub_account_tag_usage(
     if category_filter and category_filter not in CHANNEL_USAGE_CATEGORIES:
         raise BackendError(400, "渠道分类无效")
     category_filters = (category_filter,) if category_filter else CHANNEL_USAGE_CATEGORIES
-    try:
-        owner_user_id = int(session["upstream_user_id"])
-    except (TypeError, ValueError) as error:
-        raise BackendError(401, "用户身份无效，请重新登录") from error
-    category_rates = store.category_rates(owner_user_id, target_id)
+    category_rates = store.category_rates(target_id)
 
     children = await authorized_json(session, "/api/sub-accounts")
     child_items = children if isinstance(children, list) else children.get("items", []) if isinstance(children, dict) else []
@@ -1435,7 +1456,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(400, "子账号 ID 无效")
             if request.method == "DELETE":
                 data = await authorized_json(session, path, method="DELETE")
-                store.delete_category_rates(int(session["upstream_user_id"]), target_id)
+                store.delete_category_rates(target_id)
                 store.delete_sub_account_alias(target_id)
                 return success_response(request, request_id, sanitize_data(data), cookie)
 
@@ -1477,15 +1498,11 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             target_id = int(rates_match.group(1))
             if target_id <= 0:
                 raise BackendError(400, "子账号 ID 无效")
-            try:
-                owner_user_id = int(session["upstream_user_id"])
-            except (TypeError, ValueError) as error:
-                raise BackendError(401, "用户身份无效，请重新登录") from error
             if request.method == "GET":
                 return success_response(
                     request,
                     request_id,
-                    category_rates_payload(owner_user_id, target_id),
+                    category_rates_payload(target_id),
                     cookie,
                 )
 
@@ -1505,11 +1522,11 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 if not value.is_finite() or value < 0 or value > Decimal("100000"):
                     raise BackendError(400, f"{category} 汇率须在 0% 至 100000% 之间")
                 parsed_rates[category] = value
-            store.save_category_rates(owner_user_id, target_id, parsed_rates)
+            store.save_category_rates(target_id, parsed_rates)
             return success_response(
                 request,
                 request_id,
-                category_rates_payload(owner_user_id, target_id),
+                category_rates_payload(target_id),
                 cookie,
             )
 
