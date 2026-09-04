@@ -930,16 +930,16 @@ const navItems: Array<{
   label: string;
   icon: ComponentType<{ size?: number; strokeWidth?: number }>;
 }> = [
+  { key: 'model-gaps', label: '模型缺口', icon: Zap },
   { key: 'dashboard', label: '控制台', icon: Gauge },
   { key: 'upload', label: '上传密钥', icon: UploadCloud },
   { key: 'my-channels', label: '我的渠道', icon: FileKey2 },
   { key: 'api-access', label: '开放 API', icon: BookOpen },
   { key: 'sub-accounts', label: '子账号管理', icon: Users },
   { key: 'daily-stats', label: '消费快照', icon: BarChart3 },
-  { key: 'model-gaps', label: '模型缺口', icon: Zap },
 ];
 
-const subAccountNavItems = ['dashboard', 'upload', 'my-channels', 'model-gaps', 'daily-stats'].map(
+const subAccountNavItems = ['model-gaps', 'dashboard', 'upload', 'my-channels', 'daily-stats'].map(
   (key) => navItems.find((item) => item.key === key)!,
 );
 
