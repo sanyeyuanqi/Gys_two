@@ -131,6 +131,18 @@ class SessionStore:
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (sub_account_user_id, category)
                 );
+                CREATE TABLE IF NOT EXISTS category_settlement_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sub_account_user_id INTEGER NOT NULL,
+                    category TEXT NOT NULL,
+                    previous_amount TEXT NOT NULL,
+                    settled_amount TEXT NOT NULL,
+                    change_amount TEXT NOT NULL,
+                    rate_percent TEXT NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_category_settlement_records_account_time
+                    ON category_settlement_records(sub_account_user_id, created_at DESC);
                 """
             )
             rate_columns = {
@@ -618,40 +630,125 @@ class SessionStore:
         settled_amounts: dict[str, Decimal],
     ) -> None:
         now = int(time.time() * 1000)
-        values = []
-        for category in CHANNEL_USAGE_CATEGORIES:
-            formatted = format(rates[category], "f")
-            if "." in formatted:
-                formatted = formatted.rstrip("0").rstrip(".")
-            settled = format(settled_amounts[category], "f")
-            if "." in settled:
-                settled = settled.rstrip("0").rstrip(".")
-            values.append((sub_account_user_id, category, formatted, settled, now))
         with self.lock:
-            self.connection.executemany(
+            previous_rows = self.connection.execute(
                 """
-                INSERT INTO category_exchange_rates
-                    (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(sub_account_user_id, category) DO UPDATE SET
-                    rate_percent = excluded.rate_percent,
-                    settled_amount = excluded.settled_amount,
-                    updated_at = excluded.updated_at
-                """,
-                values,
-            )
-            self.connection.commit()
-
-    def delete_category_rates(self, sub_account_user_id: int) -> None:
-        with self.lock:
-            self.connection.execute(
-                """
-                DELETE FROM category_exchange_rates
+                SELECT category, settled_amount
+                FROM category_exchange_rates
                 WHERE sub_account_user_id = ?
                 """,
                 (sub_account_user_id,),
-            )
-            self.connection.commit()
+            ).fetchall()
+            previous_amounts = {category: Decimal(0) for category in CHANNEL_USAGE_CATEGORIES}
+            for row in previous_rows:
+                category = str(row["category"])
+                if category not in previous_amounts:
+                    continue
+                try:
+                    previous = Decimal(str(row["settled_amount"]))
+                except (InvalidOperation, TypeError, ValueError):
+                    continue
+                if previous.is_finite():
+                    previous_amounts[category] = previous
+
+            values = []
+            records = []
+            for category in CHANNEL_USAGE_CATEGORIES:
+                rate = format(rates[category], "f")
+                if "." in rate:
+                    rate = rate.rstrip("0").rstrip(".")
+                settled = format(settled_amounts[category], "f")
+                if "." in settled:
+                    settled = settled.rstrip("0").rstrip(".")
+                values.append((sub_account_user_id, category, rate, settled, now))
+                previous = previous_amounts[category]
+                if settled_amounts[category] != previous:
+                    previous_text = format(previous, "f")
+                    if "." in previous_text:
+                        previous_text = previous_text.rstrip("0").rstrip(".")
+                    change = format(settled_amounts[category] - previous, "f")
+                    if "." in change:
+                        change = change.rstrip("0").rstrip(".")
+                    records.append(
+                        (
+                            sub_account_user_id,
+                            category,
+                            previous_text,
+                            settled,
+                            change,
+                            rate,
+                            now,
+                        )
+                    )
+            try:
+                self.connection.executemany(
+                    """
+                    INSERT INTO category_exchange_rates
+                        (sub_account_user_id, category, rate_percent, settled_amount, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(sub_account_user_id, category) DO UPDATE SET
+                        rate_percent = excluded.rate_percent,
+                        settled_amount = excluded.settled_amount,
+                        updated_at = excluded.updated_at
+                    """,
+                    values,
+                )
+                if records:
+                    self.connection.executemany(
+                        """
+                        INSERT INTO category_settlement_records
+                            (sub_account_user_id, category, previous_amount, settled_amount,
+                             change_amount, rate_percent, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        records,
+                    )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+
+    def settlement_records(
+        self,
+        sub_account_user_id: int,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        bounded_limit = max(1, min(limit, 500))
+        with self.lock:
+            rows = self.connection.execute(
+                """
+                SELECT id, category, previous_amount, settled_amount, change_amount,
+                       rate_percent, created_at
+                FROM category_settlement_records
+                WHERE sub_account_user_id = ?
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """,
+                (sub_account_user_id, bounded_limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def delete_category_rates(self, sub_account_user_id: int) -> None:
+        with self.lock:
+            try:
+                self.connection.execute(
+                    """
+                    DELETE FROM category_exchange_rates
+                    WHERE sub_account_user_id = ?
+                    """,
+                    (sub_account_user_id,),
+                )
+                self.connection.execute(
+                    """
+                    DELETE FROM category_settlement_records
+                    WHERE sub_account_user_id = ?
+                    """,
+                    (sub_account_user_id,),
+                )
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
 
     def touch(self, session: sqlite3.Row) -> int:
         now = int(time.time() * 1000)
@@ -827,6 +924,7 @@ def category_rates_payload(
 ) -> dict[str, Any]:
     rates = store.category_rates(sub_account_user_id)
     settled_amounts = store.category_settled_amounts(sub_account_user_id)
+    settlement_records = store.settlement_records(sub_account_user_id)
     return {
         "userId": sub_account_user_id,
         "rates": [
@@ -836,6 +934,18 @@ def category_rates_payload(
                 "settledAmount": dollar_amount(settled_amounts[category]),
             }
             for category in CHANNEL_USAGE_CATEGORIES
+        ],
+        "settlementRecords": [
+            {
+                "id": int(record["id"]),
+                "category": str(record["category"]),
+                "previousAmount": dollar_amount(Decimal(str(record["previous_amount"]))),
+                "settledAmount": dollar_amount(Decimal(str(record["settled_amount"]))),
+                "changeAmount": dollar_amount(Decimal(str(record["change_amount"]))),
+                "ratePercent": decimal_text(Decimal(str(record["rate_percent"]))),
+                "createdAt": int(record["created_at"]),
+            }
+            for record in settlement_records
         ],
     }
 

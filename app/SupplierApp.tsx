@@ -253,6 +253,15 @@ type CategoryRateResponse = {
     ratePercent: string;
     settledAmount: string;
   }>;
+  settlementRecords: Array<{
+    id: number;
+    category: string;
+    previousAmount: string;
+    settledAmount: string;
+    changeAmount: string;
+    ratePercent: string;
+    createdAt: number;
+  }>;
 };
 
 type Notice = {
@@ -321,6 +330,13 @@ const englishTranslations: Record<string, string> = {
   '应付': 'Payable',
   '总应付': 'Total Payable',
   '已结算金额': 'Settled Amount',
+  '结算记录': 'Settlement History',
+  '暂无结算记录': 'No settlement history',
+  '结算时间': 'Settlement Time',
+  '变更前': 'Before',
+  '变更后': 'After',
+  '变更金额': 'Change',
+  '保存时汇率': 'Rate at Save',
   '渠道分类': 'Channel Category',
   '涉及分类': 'Categories',
   '未归属模型': 'Unattributed Model',
@@ -1052,6 +1068,28 @@ function formatDate(value?: string | null, language: Language = 'zh') {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function formatBeijingDateTime(value: number, language: Language = 'zh') {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '-';
+  return date.toLocaleString(language === 'en' ? 'en-US' : 'zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  });
+}
+
+function formatSignedDollar(value: string) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return '$0.0000';
+  const sign = amount > 0 ? '+' : amount < 0 ? '-' : '';
+  return `${sign}$${Math.abs(amount).toFixed(4)}`;
 }
 
 function buildUploadTagPreview(userId: number, category: string, timestamp: number) {
@@ -4203,6 +4241,7 @@ function SubAccountRateDialog({
   const [settledAmounts, setSettledAmounts] = useState<Record<string, string>>(() => Object.fromEntries(
     channelUsageCategories.map((category) => [category, '0']),
   ));
+  const [settlementRecords, setSettlementRecords] = useState<CategoryRateResponse['settlementRecords']>([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
@@ -4225,6 +4264,7 @@ function SubAccountRateDialog({
           category,
           value.rates.find((item) => item.category === category)?.settledAmount || '0',
         ])));
+        setSettlementRecords(value.settlementRecords || []);
       })
       .catch((failure) => {
         if (!controller.signal.aborted) {
@@ -4349,6 +4389,44 @@ function SubAccountRateDialog({
             <p className="sub-account-rate-hint">
               {t('应付 =（总消耗 - 已结算）× 汇率。')}
             </p>
+            <section className="sub-account-settlement-history">
+              <h3>{t('结算记录')}</h3>
+              {settlementRecords.length > 0 ? (
+                <div className="table-wrap sub-account-settlement-history-table-wrap">
+                  <table className="sub-account-settlement-history-table">
+                    <thead>
+                      <tr>
+                        <th>{t('结算时间')}</th>
+                        <th>{t('渠道分类')}</th>
+                        <th>{t('变更前')}</th>
+                        <th>{t('变更后')}</th>
+                        <th>{t('变更金额')}</th>
+                        <th>{t('保存时汇率')}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {settlementRecords.map((record) => {
+                        const change = Number(record.changeAmount);
+                        return (
+                          <tr key={record.id}>
+                            <td>{formatBeijingDateTime(record.createdAt, language)}</td>
+                            <td>{categoryLabel(record.category, language)}</td>
+                            <td>${record.previousAmount}</td>
+                            <td>${record.settledAmount}</td>
+                            <td className={change > 0 ? 'positive' : change < 0 ? 'negative' : ''}>
+                              {formatSignedDollar(record.changeAmount)}
+                            </td>
+                            <td>{record.ratePercent}%</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="sub-account-settlement-history-empty">{t('暂无结算记录')}</p>
+              )}
+            </section>
             {error && <p className="account-dialog-error" role="alert">{error}</p>}
             <div className="account-dialog-actions">
               <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</button>

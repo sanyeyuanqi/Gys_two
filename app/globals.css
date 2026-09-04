@@ -1005,6 +1005,78 @@ textarea:focus {
   color: var(--muted);
 }
 
+.sub-account-settlement-history {
+  display: grid;
+  gap: 9px;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.sub-account-settlement-history h3 {
+  margin: 0;
+  color: #344054;
+  font-size: 14px;
+}
+
+.sub-account-settlement-history-table-wrap {
+  max-height: 220px;
+  border: 1px solid #d8dee9;
+  border-radius: 7px;
+}
+
+.sub-account-settlement-history-table {
+  width: 100%;
+  min-width: 720px;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.sub-account-settlement-history-table th,
+.sub-account-settlement-history-table td {
+  border-bottom: 1px solid #eaecf0;
+  padding: 9px 10px;
+  white-space: nowrap;
+}
+
+.sub-account-settlement-history-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #f8fafc;
+  color: #667085;
+  text-align: left;
+  font-weight: 600;
+}
+
+.sub-account-settlement-history-table tr:last-child td {
+  border-bottom: 0;
+}
+
+.sub-account-settlement-history-table td:nth-child(n + 3) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.sub-account-settlement-history-table .positive {
+  color: #039855;
+  font-weight: 700;
+}
+
+.sub-account-settlement-history-table .negative {
+  color: #d92d20;
+  font-weight: 700;
+}
+
+.sub-account-settlement-history-empty {
+  margin: 0;
+  border: 1px dashed #d8dee9;
+  border-radius: 7px;
+  padding: 18px;
+  color: var(--muted);
+  text-align: center;
+  font-size: 13px;
+}
+
 .account-dialog input:disabled {
   cursor: not-allowed;
   background: #f5f7fa;
