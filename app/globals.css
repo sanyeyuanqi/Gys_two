@@ -5958,6 +5958,10 @@ body:has(.app-shell .upload-page) {
     padding: 12px;
   }
 
+  .my-channel-filters.is-list-view {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
   .my-channel-filter-label {
     display: none;
   }
@@ -5967,6 +5971,12 @@ body:has(.app-shell .upload-page) {
     width: 100%;
     height: 44px;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .my-channel-filters.is-list-view .my-channel-view-switch,
+  .my-channel-filters.is-list-view .app-date-range,
+  .my-channel-filters.is-list-view .my-channel-search-box {
+    grid-column: 1 / -1;
   }
 
   .my-channel-view-switch button {
@@ -5988,6 +5998,29 @@ body:has(.app-shell .upload-page) {
   .my-channel-filters .my-channel-filter-select,
   .my-channel-filters .my-channel-search-box input {
     height: 44px;
+  }
+
+  .my-channel-filters .my-channel-filter-select [data-slot='select-value'] {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .my-channel-filter-select-content {
+    max-width: calc(100vw - 24px);
+  }
+
+  .my-channel-filter-select-content [data-slot='select-item'] {
+    min-height: 44px;
+  }
+
+  .my-channel-filter-select-content [data-slot='select-item'] > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .app-date-picker-actions .ghost-button,

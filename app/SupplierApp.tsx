@@ -3717,7 +3717,7 @@ function MyChannelsView() {
         </div>
       </div>
 
-      <div className="my-channel-filters">
+      <div className={`my-channel-filters ${viewMode === 'list' ? 'is-list-view' : 'is-group-view'}`}>
         <div className="my-channel-view-switch" role="tablist" aria-label={t('我的渠道')}>
           <button className={viewMode === 'group' ? 'active' : ''} onClick={() => changeView('group')} type="button">
               {t('分组视图')}
