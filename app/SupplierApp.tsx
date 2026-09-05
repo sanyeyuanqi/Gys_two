@@ -19,6 +19,7 @@ import {
   FileKey2,
   Gauge,
   Info,
+  Languages,
   Loader2,
   LockKeyhole,
   LogOut,
@@ -68,6 +69,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Switch } from '@/components/ui/switch';
+import {
+  AlertDialog, AlertDialogTrigger, AlertDialogContent, AlertDialogHeader,
+  AlertDialogTitle, AlertDialogDescription, AlertDialogFooter, AlertDialogCancel, AlertDialogAction,
+} from '@/components/ui/alert-dialog';
+import { ActionButton } from '@/components/ui/action-button';
 import LoginCaptcha from './LoginCaptcha';
 import { SessionExpiredError, sessionClient } from './session';
 
@@ -294,6 +300,8 @@ type SettlementTransaction = {
   id: string;
   createdAt: number;
   legacy: boolean;
+  payer: { id: number; source: string; username: string; displayName: string } | null;
+  payee: { id: number; source: string; username: string; displayName: string } | null;
   items: SettlementRecord[];
   totalConsumptionAmount: string;
   totalSettlementAmount: string;
@@ -308,10 +316,6 @@ type CategoryRateResponse = {
   }>;
   settlementRecords: SettlementRecord[];
   settlementTransactions: SettlementTransaction[];
-};
-
-type SubAccountSettlementDataResponse = CategoryRateResponse & {
-  settlementSummary: SubAccountSettlementSummary;
 };
 
 type BatchSettlementResponse = {
@@ -329,10 +333,21 @@ type AnnouncementItem = {
   id: number;
   title: string;
   content: string;
+  titleZh?: string | null;
+  contentZh?: string | null;
+  titleEn?: string | null;
+  contentEn?: string | null;
   published: boolean;
   createdAt: number;
   updatedAt: number;
   publishedAt: number | null;
+};
+
+type AnnouncementCreatePayload = {
+  titleZh: string;
+  contentZh: string;
+  titleEn: string;
+  contentEn: string;
 };
 
 type AnnouncementListResponse = {
@@ -395,6 +410,7 @@ const englishTranslations: Record<string, string> = {
   '该账号存在结算历史，禁止删除': 'This account has settlement history and cannot be deleted',
   '查看结算': 'View Settlements',
   '查看 {{name}} 的结算记录': 'View settlements for {{name}}',
+  '每页10笔交易': '10 transactions per page',
   '显示最近100笔交易': 'Showing the latest 100 transactions',
   '交易编号': 'Transaction ID',
   '历史记录': 'Legacy record',
@@ -411,7 +427,7 @@ const englishTranslations: Record<string, string> = {
   '已结算（$）': 'Settled ($)',
   '应结算（$）': 'Amount due ($)',
   '应支付（USDT）': 'Payable (USDT)',
-  '上 Key 系统': 'Key Upload System',
+  'PushKey系统': 'PushKey System',
   '控制台': 'Dashboard',
   '渠道运行状态、消费额度与健康度概览。': 'Channel status, usage, and health overview.',
   '上传密钥': 'Upload Keys',
@@ -488,6 +504,19 @@ const englishTranslations: Record<string, string> = {
   '{{category}} · 总消耗：${{amount}}': '{{category}} · Total usage: ${{amount}}',
   '已结算': 'Settled',
   '已结算金额': 'Settled Amount',
+  '结算历史': 'Settlement History',
+  '查看当前账户的结算交易与分类明细。': 'View settlement transactions and category details for your account.',
+  '第 {{page}} 页': 'Page {{page}}',
+  '结算详情': 'Settlement details',
+  '查看支付渠道详情': 'View payment channel details',
+  '查看详情': 'View details',
+  '删除结算': 'Delete settlement',
+  '删除并恢复额度': 'Delete and restore usage',
+  '删除后，本笔消耗额度将退回待结算，其他结算记录保持不变。': 'This transaction’s usage will become available for settlement again. Other transactions remain unchanged.',
+  '删除结算失败': 'Failed to delete settlement',
+  '付款人': 'Payer',
+  '收款人': 'Payee',
+  '未记录': 'Not recorded',
   '结算记录': 'Settlement History',
   '暂无结算记录': 'No settlement history',
   '结算时间': 'Settlement Time',
@@ -750,6 +779,17 @@ const englishTranslations: Record<string, string> = {
   '发布和管理站内公告。': 'Publish and manage site announcements.',
   '添加公告': 'Add Announcement',
   '填写公告内容，发布后会显示在顶部通知中。': 'Enter the announcement details. Published announcements will appear in the top notification center.',
+  '分别填写中文和英文公告，用户将看到与当前语言一致的内容。': 'Enter both Chinese and English versions. Users will see the version matching their current language.',
+  '中文版本': 'Chinese Version',
+  '英文版本': 'English Version',
+  '中文标题': 'Chinese Title',
+  '请输入中文公告标题': 'Enter the Chinese announcement title',
+  '中文内容': 'Chinese Content',
+  '请输入中文公告内容': 'Enter the Chinese announcement content',
+  '英文标题': 'English Title',
+  '请输入英文公告标题': 'Enter the English announcement title',
+  '英文内容': 'English Content',
+  '请输入英文公告内容': 'Enter the English announcement content',
   '发布公告': 'Publish Announcement',
   '公告标题': 'Announcement Title',
   '请输入公告标题': 'Enter an announcement title',
@@ -824,6 +864,10 @@ const englishTranslations: Record<string, string> = {
   '更新时间': 'Updated At',
   '数据同步时间': 'Data synced at',
   '本站用户名': 'Local username',
+  '本站显示名': 'Local display name',
+  '请输入本站显示名': 'Enter a local display name',
+  '请输入本站用户名': 'Enter a local username',
+  '本站用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores for the local username',
   '启用同步': 'Enable sync',
   '禁用同步': 'Disable sync',
   '已启用同步': 'Sync enabled',
@@ -836,7 +880,7 @@ const englishTranslations: Record<string, string> = {
   '保存映射': 'Save Mapping',
   '请输入有效的显示名': 'Enter a valid display name',
   '当前账号无权限管理子账号': 'This account cannot manage sub-accounts',
-  '管理子账号、结算及分类汇率。': 'Manage sub-accounts, settlements, and category rates.',
+  '管理子账号及分类汇率。': 'Manage sub-accounts and category rates.',
   '正在检查权限': 'Checking permissions',
   '新增子账号': 'Add Sub-account',
   '创建子账号': 'Create Sub-account',
@@ -953,6 +997,7 @@ type ViewKey =
   | 'api-access'
   | 'sub-accounts'
   | 'daily-stats'
+  | 'settlement-history'
   | 'announcements'
   | 'user-mappings'
   | 'model-gaps';
@@ -1163,6 +1208,7 @@ const navItems: Array<{
   { key: 'api-access', label: '开放 API', icon: BookOpen },
   { key: 'sub-accounts', label: '子账号管理', icon: Users },
   { key: 'daily-stats', label: '消费快照', icon: BarChart3 },
+  { key: 'settlement-history', label: '结算历史', icon: CircleDollarSign },
   { key: 'announcements', label: '公告管理', icon: Megaphone },
   { key: 'user-mappings', label: '用户映射', icon: Users },
 ];
@@ -1174,8 +1220,9 @@ const supplierViewOrder: ViewKey[] = [
   'my-channels',
   'sub-accounts',
   'daily-stats',
+  'settlement-history',
 ];
-const subAccountViewOrder: ViewKey[] = ['model-gaps', 'dashboard', 'upload', 'my-channels', 'daily-stats'];
+const subAccountViewOrder: ViewKey[] = ['model-gaps', 'dashboard', 'upload', 'my-channels', 'daily-stats', 'settlement-history'];
 const superAdminViewOrder: ViewKey[] = ['user-mappings', 'announcements', 'model-gaps'];
 
 function isSuperAdmin(user: UserProfile) {
@@ -1515,23 +1562,23 @@ function AppDateRangePicker({
         <div className="app-date-picker-actions">
           <div>
             {clearable && (
-              <button className="ghost-button compact" onClick={clearRange} type="button">
+              <ActionButton className="ghost-button compact" onClick={clearRange} type="button">
                 {t('清除')}
-              </button>
+              </ActionButton>
             )}
           </div>
           <div className="app-date-picker-action-group">
-            <button className="ghost-button compact" onClick={() => setOpen(false)} type="button">
+            <ActionButton className="ghost-button compact" onClick={() => setOpen(false)} type="button">
               {t('取消')}
-            </button>
-            <button
+            </ActionButton>
+            <ActionButton
               className="primary-button compact"
               disabled={!draftRange?.from && !draftRange?.to}
               onClick={applyRange}
               type="button"
             >
               {t('确定')}
-            </button>
+            </ActionButton>
           </div>
         </div>
       </PopoverContent>
@@ -1771,7 +1818,7 @@ function NoticeBanner({ notice }: { notice: Notice | null }) {
 }
 
 function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
-  const { language, setLanguage } = useLanguage();
+  const { language, setLanguage, t } = useLanguage();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -1786,7 +1833,16 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
   const copy =
     language === 'zh'
       ? {
-          title: '上 Key 系统',
+          brand: 'PushKey系统',
+          accentKicker: 'PUSHKEY CONSOLE',
+          accentTitle: '渠道、密钥与用量',
+          accentNote: '致力于研制最顶级的大模型',
+          accentTags: ['渠道管理', '密钥上传', '用量查看'],
+          accentMetrics: [
+            ['渠道', '集中管理'],
+            ['密钥', '统一入口'],
+            ['用量', '清晰可见'],
+          ],
           username: '用户名',
           password: '密码',
           usernameRequired: '请输入用户名',
@@ -1798,7 +1854,16 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
           captchaConfigFailed: '无法获取登录验证配置，请重试',
         }
       : {
-          title: 'Key Upload System',
+          brand: 'PushKey System',
+          accentKicker: 'PUSHKEY CONSOLE',
+          accentTitle: 'Channels, keys, and usage',
+          accentNote: 'Committed to developing world-class large language models.',
+          accentTags: ['Channels', 'Key upload', 'Usage'],
+          accentMetrics: [
+            ['Channels', 'Centralized'],
+            ['Keys', 'One entry'],
+            ['Usage', 'Clear view'],
+          ],
           username: 'Username',
           password: 'Password',
           usernameRequired: 'Please enter your username',
@@ -1884,79 +1949,101 @@ function LoginScreen({ onLogin }: { onLogin: (user: UserProfile) => void }) {
           <span>{notice.text}</span>
         </div>
       )}
-      <section className="login-card">
-        <div className="login-language-row">
-          <div className="login-language-switch" aria-label="Language" role="group">
-            <button
-              aria-pressed={language === 'zh'}
-              className={language === 'zh' ? 'active' : ''}
-              onClick={() => setLanguage('zh')}
-              type="button"
-            >
-              中文
-            </button>
-            <button
-              aria-pressed={language === 'en'}
-              className={language === 'en' ? 'active' : ''}
-              onClick={() => setLanguage('en')}
-              type="button"
-            >
-              English
-            </button>
-          </div>
+      <div className="login-utility-bar">
+        <button
+          aria-label={t('语言切换')}
+          className="topbar-round-button login-translation-button"
+          onClick={() => setLanguage(language === 'zh' ? 'en' : 'zh')}
+          title={t('语言切换')}
+          type="button"
+        >
+          <Languages aria-hidden="true" size={19} />
+        </button>
+        <AnnouncementCenter userKey="public:login" />
+      </div>
+      <div className="login-ambient-copy" aria-hidden="true">
+        <span>{copy.accentKicker}</span>
+        <strong>{copy.accentTitle}</strong>
+        <p>{copy.accentNote}</p>
+        <div>
+          {copy.accentTags.map((tag) => <small key={tag}>{tag}</small>)}
         </div>
-        <h1>{copy.title}</h1>
-        <form onSubmit={submit} className="login-form" noValidate>
-          <div className="login-form-item">
-            <div className={fieldErrors.username ? 'login-input login-input-error' : 'login-input'}>
-              <User size={17} />
-              <input
-                aria-invalid={Boolean(fieldErrors.username)}
-                aria-label={copy.username}
-                value={username}
-                onChange={(event) => {
-                  setUsername(event.target.value);
-                  if (fieldErrors.username) setFieldErrors((current) => ({ ...current, username: '' }));
-                }}
-                placeholder={copy.username}
-                autoComplete="username"
-              />
+      </div>
+      <div className="login-ambient-metrics" aria-hidden="true">
+        {copy.accentMetrics.map(([label, value]) => (
+          <span key={label}>
+            <small>{label}</small>
+            <strong>{value}</strong>
+          </span>
+        ))}
+      </div>
+      <div className="login-ambient-stack" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+      </div>
+      <div className="login-ambient-orbit" aria-hidden="true"><span /></div>
+      <div className="login-layout">
+        <section className="login-card">
+          <header className="login-card-header">
+            <div className="login-brand">{copy.brand}</div>
+          </header>
+          <form onSubmit={submit} className="login-form" noValidate>
+            <div className="login-form-item">
+              <label className="login-field-label" htmlFor="login-username">{copy.username}</label>
+              <div className={fieldErrors.username ? 'login-input login-input-error' : 'login-input'}>
+                <User size={17} />
+                <input
+                  id="login-username"
+                  aria-invalid={Boolean(fieldErrors.username)}
+                  aria-label={copy.username}
+                  value={username}
+                  onChange={(event) => {
+                    setUsername(event.target.value);
+                    if (fieldErrors.username) setFieldErrors((current) => ({ ...current, username: '' }));
+                  }}
+                  placeholder={copy.username}
+                  autoComplete="username"
+                />
+              </div>
+              {fieldErrors.username && <span className="login-field-error">{fieldErrors.username}</span>}
             </div>
-            {fieldErrors.username && <span className="login-field-error">{fieldErrors.username}</span>}
-          </div>
-          <div className="login-form-item">
-            <div className={fieldErrors.password ? 'login-input login-input-error' : 'login-input'}>
-              <LockKeyhole size={17} />
-              <input
-                aria-invalid={Boolean(fieldErrors.password)}
-                aria-label={copy.password}
-                value={password}
-                onChange={(event) => {
-                  setPassword(event.target.value);
-                  if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: '' }));
-                }}
-                placeholder={copy.password}
-                autoComplete="current-password"
-                type={showPassword ? 'text' : 'password'}
-              />
-              <button
-                aria-label={showPassword ? copy.hidePassword : copy.showPassword}
-                className="login-password-toggle"
-                onClick={() => setShowPassword((current) => !current)}
-                onMouseDown={(event) => event.preventDefault()}
-                type="button"
-              >
-                {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
-              </button>
+            <div className="login-form-item">
+              <label className="login-field-label" htmlFor="login-password">{copy.password}</label>
+              <div className={fieldErrors.password ? 'login-input login-input-error' : 'login-input'}>
+                <LockKeyhole size={17} />
+                <input
+                  id="login-password"
+                  aria-invalid={Boolean(fieldErrors.password)}
+                  aria-label={copy.password}
+                  value={password}
+                  onChange={(event) => {
+                    setPassword(event.target.value);
+                    if (fieldErrors.password) setFieldErrors((current) => ({ ...current, password: '' }));
+                  }}
+                  placeholder={copy.password}
+                  autoComplete="current-password"
+                  type={showPassword ? 'text' : 'password'}
+                />
+                <button
+                  aria-label={showPassword ? copy.hidePassword : copy.showPassword}
+                  className="login-password-toggle"
+                  onClick={() => setShowPassword((current) => !current)}
+                  onMouseDown={(event) => event.preventDefault()}
+                  type="button"
+                >
+                  {showPassword ? <Eye size={15} /> : <EyeOff size={15} />}
+                </button>
+              </div>
+              {fieldErrors.password && <span className="login-field-error">{fieldErrors.password}</span>}
             </div>
-            {fieldErrors.password && <span className="login-field-error">{fieldErrors.password}</span>}
-          </div>
-          <button className="login-submit-button" disabled={loading} type="submit">
-            {loading && <Loader2 className="spin" size={17} />}
-            {copy.submit}
-          </button>
-        </form>
-      </section>
+            <ActionButton className="login-submit-button" disabled={loading} type="submit">
+              {loading && <Loader2 className="spin" size={17} />}
+              {copy.submit}
+            </ActionButton>
+          </form>
+        </section>
+      </div>
       {captchaOpen && (
         <LoginCaptcha
           language={language}
@@ -2000,6 +2087,17 @@ function announcementVersion(item: AnnouncementItem) {
   return `${item.id}:${item.publishedAt || item.updatedAt}`;
 }
 
+function localizedAnnouncement(item: AnnouncementItem, language: Language) {
+  const titleZh = item.titleZh?.trim() || item.title.trim();
+  const contentZh = item.contentZh?.trim() || item.content.trim();
+  const titleEn = item.titleEn?.trim() || '';
+  const contentEn = item.contentEn?.trim() || '';
+  if (language === 'en' && titleEn && contentEn) {
+    return { title: titleEn, content: contentEn };
+  }
+  return { title: titleZh, content: contentZh };
+}
+
 function announcementPosition(item: AnnouncementItem) {
   return {
     publishedAt: item.publishedAt || item.updatedAt,
@@ -2019,6 +2117,9 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
   const snoozeStorageKey = `gys:announcement:snooze:${storageUserKey}`;
   const seenStorageKey = `gys:announcement:seen:${storageUserKey}`;
   const activeAnnouncement = items[0] || null;
+  const activeAnnouncementCopy = activeAnnouncement
+    ? localizedAnnouncement(activeAnnouncement, language)
+    : null;
 
   const load = useCallback(async (signal?: AbortSignal, showAutomatically = false) => {
     setLoading(true);
@@ -2161,7 +2262,7 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
             )}
             {mode === 'notice' && (
               <DialogDescription className="sr-only">
-                {activeAnnouncement?.title || t('公告通知')}
+                {activeAnnouncementCopy?.title || t('公告通知')}
               </DialogDescription>
             )}
           </div>
@@ -2173,12 +2274,12 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
           {mode === 'notice' && activeAnnouncement ? (
             <article className="announcement-featured-article">
               <header>
-                <h2>{activeAnnouncement.title}</h2>
+                <h2>{activeAnnouncementCopy?.title}</h2>
                 <time dateTime={new Date(activeAnnouncement.publishedAt || activeAnnouncement.createdAt).toISOString()}>
                   {formatBeijingDateTime(activeAnnouncement.publishedAt || activeAnnouncement.createdAt, language)}
                 </time>
               </header>
-              <p>{activeAnnouncement.content}</p>
+              <p>{activeAnnouncementCopy?.content}</p>
             </article>
           ) : loading ? (
             <div className="announcement-dialog-loading">
@@ -2190,23 +2291,26 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
               <AlertTriangle size={22} />
               <strong>{t('加载公告失败')}</strong>
               <p>{error}</p>
-              <button className="ghost-button compact" onClick={() => load()} type="button">
+              <ActionButton className="ghost-button compact" onClick={() => load()} type="button">
                 <RefreshCcw size={15} />{t('重试')}
-              </button>
+              </ActionButton>
             </div>
           ) : items.length ? (
             <div className="announcement-dialog-list">
-              {items.map(item => (
-                <article className="announcement-dialog-item" key={item.id}>
-                  <div className="announcement-dialog-item-heading">
-                    <h3>{item.title}</h3>
-                    <time dateTime={new Date(item.publishedAt || item.createdAt).toISOString()}>
-                      {formatBeijingDateTime(item.publishedAt || item.createdAt, language)}
-                    </time>
-                  </div>
-                  <p className="announcement-dialog-item-content">{item.content}</p>
-                </article>
-              ))}
+              {items.map(item => {
+                const itemCopy = localizedAnnouncement(item, language);
+                return (
+                  <article className="announcement-dialog-item" key={item.id}>
+                    <div className="announcement-dialog-item-heading">
+                      <h3>{itemCopy.title}</h3>
+                      <time dateTime={new Date(item.publishedAt || item.createdAt).toISOString()}>
+                        {formatBeijingDateTime(item.publishedAt || item.createdAt, language)}
+                      </time>
+                    </div>
+                    <p className="announcement-dialog-item-content">{itemCopy.content}</p>
+                  </article>
+                );
+              })}
             </div>
           ) : (
             <div className="announcement-empty">
@@ -2220,12 +2324,12 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
         </div>
         {mode === 'notice' && activeAnnouncement && (
           <footer className="announcement-featured-actions">
-            <button className="ghost-button compact" onClick={hideForToday} type="button">
+            <ActionButton className="ghost-button compact" onClick={hideForToday} type="button">
               {t('今日关闭')}
-            </button>
-            <button className="primary-button compact announcement-dismiss-button" onClick={dismissAnnouncement} type="button">
+            </ActionButton>
+            <ActionButton className="primary-button compact announcement-dismiss-button" onClick={dismissAnnouncement} type="button">
               {t('关闭公告')}
-            </button>
+            </ActionButton>
           </footer>
         )}
       </DialogContent>
@@ -2478,18 +2582,18 @@ function Shell({
               </label>
               {passwordError && <p className="account-dialog-error">{passwordError}</p>}
               <div className="account-dialog-actions">
-                <button
+                <ActionButton
                   className="ghost-button"
                   disabled={changingPassword}
                   onClick={() => setPasswordDialogOpen(false)}
                   type="button"
                 >
                   {t('取消')}
-                </button>
-                <button className="primary-button compact" disabled={changingPassword} type="submit">
+                </ActionButton>
+                <ActionButton className="primary-button compact" disabled={changingPassword} type="submit">
                   {changingPassword && <Loader2 className="spin" size={16} />}
                   {t('确定')}
-                </button>
+                </ActionButton>
               </div>
             </form>
           </section>
@@ -2678,10 +2782,10 @@ function DashboardView({ setView }: { setView: (view: ViewKey) => void }) {
             <strong>{t('加载控制台失败')}</strong>
             <p>{notice?.text || t('加载控制台失败')}</p>
           </div>
-          <button className="ghost-button compact" onClick={() => void load(true)} type="button">
+          <ActionButton className="ghost-button compact" onClick={() => void load(true)} type="button">
             <RefreshCcw size={15} />
             {t('重新加载')}
-          </button>
+          </ActionButton>
         </div>
       )}
     </section>
@@ -3080,7 +3184,7 @@ function UploadView({ userId }: { userId: number }) {
             </div>
 
             {visibleCategoryCards.length > 2 && !showAllMobileCategories && (
-              <button
+              <ActionButton
                 aria-controls="upload-category-grid"
                 aria-expanded="false"
                 className="ghost-button compact upload-category-show-all"
@@ -3089,7 +3193,7 @@ function UploadView({ userId }: { userId: number }) {
               >
                 {t('查看全部')}
                 <ChevronDown aria-hidden="true" size={15} />
-              </button>
+              </ActionButton>
             )}
 
             {activeCategoryCard && activeCategoryCard.categories.length > 1 && (
@@ -3323,14 +3427,14 @@ function UploadView({ userId }: { userId: number }) {
           </section>
 
           <footer className="upload-submit-bar">
-            <button
+            <ActionButton
               className="primary-button upload-submit-button"
               disabled={submitting || !parsedKeys.length || (mode === 'single' && category === 'aws_a' && !baseUrl.trim())}
               type="submit"
             >
               {submitting ? <Loader2 className="spin" size={17} /> : <UploadCloud size={17} />}
               {standby ? t('入库存') : mode === 'batch' ? t('批量提交') : t('提交密钥')}
-            </button>
+            </ActionButton>
           </footer>
         </form>
 
@@ -3864,18 +3968,18 @@ function MyChannelsView() {
       <div className="my-channels-titlebar">
         <h1>{t('我的渠道')}</h1>
         <div className="my-channels-actions">
-          <button className="primary-button compact" disabled={syncing} onClick={syncUsage} type="button">
+          <ActionButton className="primary-button compact" disabled={syncing} onClick={syncUsage} type="button">
             <RefreshCcw className={syncing ? 'spin' : ''} size={15} />
             {syncing ? t('同步中...') : t('同步用量')}
-          </button>
-          <button className="ghost-button compact" disabled={loading} onClick={() => load(true)} type="button">
+          </ActionButton>
+          <ActionButton className="ghost-button compact" disabled={loading} onClick={() => load(true)} type="button">
             <RefreshCcw className={loading ? 'spin' : ''} size={15} />
             {t('刷新')}
-          </button>
-          <button className="ghost-button compact" onClick={openDisableKeywords} type="button">
+          </ActionButton>
+          <ActionButton className="ghost-button compact" onClick={openDisableKeywords} type="button">
             <AlertTriangle size={15} />
             {t('建议禁用词')}
-          </button>
+          </ActionButton>
         </div>
       </div>
 
@@ -4104,9 +4208,9 @@ function MyChannelsView() {
                         </td>
                         <td>{formatQuota(group.used_quota || group.quota)}</td>
                         <td>
-                          <button className="my-channel-manage-button" onClick={() => manageGroup(group)} type="button">
+                          <ActionButton className="my-channel-manage-button" onClick={() => manageGroup(group)} type="button">
                             {t('在列表中管理')}
-                          </button>
+                          </ActionButton>
                         </td>
                       </tr>
                       {expanded && (
@@ -4191,16 +4295,16 @@ function MyChannelsView() {
                     <td>{formatDate(item.created_at, language)}</td>
                     <td className="my-channel-row-actions-cell">
                       <div className="my-channel-row-actions">
-                        <button
+                        <ActionButton
                           disabled={rowAction?.id === item.id}
                           onClick={() => openChannelTest(item)}
                           type="button"
                         >
                           <Activity size={13} />
                           {t('测试')}
-                        </button>
+                        </ActionButton>
                         {item.status !== 0 && (
-                          <button
+                          <ActionButton
                             className={item.status === 1 ? '' : 'enable'}
                             disabled={rowAction?.id === item.id}
                             onClick={() => requestChannelStatusChange(item)}
@@ -4210,12 +4314,12 @@ function MyChannelsView() {
                               ? <Loader2 className="spin" size={13} />
                               : item.status === 1 ? <XCircle size={13} /> : <CheckCircle2 size={13} />}
                             {item.status === 1 ? t('停用') : t('启用')}
-                          </button>
+                          </ActionButton>
                         )}
                         {item.status === 0 ? (
                           <Badge tone="neutral">{t('已删除')}</Badge>
                         ) : (
-                          <button
+                          <ActionButton
                             className="danger"
                             disabled={rowAction?.id === item.id}
                             onClick={() => requestChannelDelete(item)}
@@ -4225,7 +4329,7 @@ function MyChannelsView() {
                               ? <Loader2 className="spin" size={13} />
                               : <Trash2 size={13} />}
                             {t('删除')}
-                          </button>
+                          </ActionButton>
                         )}
                       </div>
                     </td>
@@ -4347,15 +4451,15 @@ function MyChannelsView() {
             </div>
 
             <footer className="channel-confirm-footer">
-              <button
+              <ActionButton
                 className="ghost-button"
                 disabled={channelConfirmationBusy}
                 onClick={closeChannelConfirmation}
                 type="button"
               >
                 {t('取消')}
-              </button>
-              <button
+              </ActionButton>
+              <ActionButton
                 className={`channel-confirm-submit ${channelConfirmation.type === 'delete' ? 'danger' : ''}`}
                 disabled={channelConfirmationBusy}
                 onClick={confirmChannelAction}
@@ -4363,7 +4467,7 @@ function MyChannelsView() {
               >
                 {channelConfirmationBusy && <Loader2 className="spin" size={15} />}
                 {channelConfirmationBusy ? t('处理中...') : t('确定')}
-              </button>
+              </ActionButton>
             </footer>
           </section>
         </div>
@@ -4455,7 +4559,7 @@ function MyChannelsView() {
                   {!testModels.length && <option value="">{t('选择要测试的模型')}</option>}
                   {testModels.map((model) => <option key={model} value={model}>{model}</option>)}
                 </select>
-                <button
+                <ActionButton
                   className="primary-button channel-test-action"
                   disabled={testLoading || !testModel}
                   onClick={testSelectedModel}
@@ -4463,8 +4567,8 @@ function MyChannelsView() {
                 >
                   {testLoading && !testProgress && <Loader2 className="spin" size={15} />}
                   {t('测试该模型')}
-                </button>
-                <button
+                </ActionButton>
+                <ActionButton
                   className="ghost-button channel-test-action"
                   disabled={testLoading || !testModels.length}
                   onClick={testAllModels}
@@ -4474,7 +4578,7 @@ function MyChannelsView() {
                     ? <Loader2 className="spin" size={15} />
                     : <Zap size={15} />}
                   {t('测试全部模型（{{count}}）', { count: testModels.length })}
-                </button>
+                </ActionButton>
               </div>
 
               {testError && (
@@ -4535,7 +4639,7 @@ function MyChannelsView() {
             </div>
 
             <footer className="channel-test-footer">
-              <button className="ghost-button" disabled={testLoading} onClick={closeChannelTest} type="button">{t('关闭')}</button>
+              <ActionButton className="ghost-button" disabled={testLoading} onClick={closeChannelTest} type="button">{t('关闭')}</ActionButton>
             </footer>
           </section>
         </div>
@@ -4559,10 +4663,10 @@ function MyChannelsView() {
                 onChange={(event) => setNewKeyword(event.target.value)}
                 placeholder={t('例如 Your credit balance is too low')}
               />
-              <button className="primary-button compact" disabled={keywordSaving} type="submit">
+              <ActionButton className="primary-button compact" disabled={keywordSaving} type="submit">
                 {keywordSaving && <Loader2 className="spin" size={15} />}
                 {t('提交')}
-              </button>
+              </ActionButton>
             </form>
             <div className="keyword-dialog-list">
               {keywordsLoading ? (
@@ -4660,10 +4764,10 @@ function ApiAccessView() {
         <article className="panel">
           <div className="panel-title">
             <h2>{t('API 密钥')}</h2>
-            <button className="text-button" onClick={() => load(true)} type="button">
+            <ActionButton className="text-button" onClick={() => load(true)} type="button">
               <RefreshCcw size={16} />
               {t('刷新')}
-            </button>
+            </ActionButton>
           </div>
           {loading ? (
             <div className="loading-block">
@@ -4712,10 +4816,10 @@ function ApiAccessView() {
                 </button>
               ))}
             </div>
-            <button className="primary-button compact" type="submit">
+            <ActionButton className="primary-button compact" type="submit">
               <Plus size={17} />
               {t('创建密钥')}
-            </button>
+            </ActionButton>
           </form>
         </article>
       </div>
@@ -5182,13 +5286,13 @@ function UserMappingDialog({
             {error && <p className="account-dialog-error" role="alert">{error}</p>}
           </div>
           <div className="account-dialog-actions user-mapping-dialog-actions">
-            <button className="ghost-button" disabled={saving} onClick={onClose} type="button">
+            <ActionButton className="ghost-button" disabled={saving} onClick={onClose} type="button">
               {t('取消')}
-            </button>
-            <button className="primary-button compact" disabled={saving} type="submit">
+            </ActionButton>
+            <ActionButton className="primary-button compact" disabled={saving} type="submit">
               {saving && <Loader2 className="spin" size={16} />}
               {t(saving ? '保存中...' : '保存映射')}
-            </button>
+            </ActionButton>
           </div>
         </form>
       </DialogContent>
@@ -5200,7 +5304,7 @@ function UserMappingUsageDialog({
   mapping,
   onClose,
 }: {
-  mapping: UserMapping;
+  mapping: Pick<UserMapping, 'public_username' | 'upstream_user_id'>;
   onClose: () => void;
 }) {
   const { language, t } = useLanguage();
@@ -5319,9 +5423,9 @@ function UserMappingUsageDialog({
             <div className="user-usage-state error" role="alert">
               <AlertTriangle size={25} />
               <p>{error}</p>
-              <button className="ghost-button compact" onClick={() => setAttempt(value => value + 1)} type="button">
+              <ActionButton className="ghost-button compact" onClick={() => setAttempt(value => value + 1)} type="button">
                 <RefreshCcw size={15} />{t('重试')}
-              </button>
+              </ActionButton>
             </div>
           ) : !snapshot?.available ? (
             <div className="user-usage-state" role="status">
@@ -5347,10 +5451,10 @@ function UserMappingUsageDialog({
               </section>
               <div className="user-usage-details-heading">
                 <strong>{t('分类明细')}</strong>
-                <button className="primary-button compact" type="button" disabled={!selectedItems.length || syncing}
+                <ActionButton className="primary-button compact" type="button" disabled={!selectedItems.length || syncing}
                   onClick={() => setSettlingItems(selectedItems)}>
                   {t('批量结算（{{count}}）', { count: selectedItems.length })}
-                </button>
+                </ActionButton>
                 <span>{t('共 {{count}} 个分类', { count: snapshot.categories.length })}</span>
               </div>
               <div
@@ -5399,11 +5503,11 @@ function UserMappingUsageDialog({
                           <td className="user-usage-amount">{amountDue == null ? '—' : `$${formatDollarText(String(amountDue))}`}</td>
                           <td className="user-usage-amount">{payable == null ? '—' : formatDollarText(String(payable))}</td>
                           <td>
-                            <button className="user-mapping-edit-button" type="button"
+                            <ActionButton className="user-usage-settle-button" type="button"
                               disabled={!(Number(item.outstandingAmount) >= 1)}
                               onClick={() => setSettlingItems([item])}>
-                              {t('结算')}
-                            </button>
+                              <CircleDollarSign size={15} aria-hidden="true" />{t('结算')}
+                            </ActionButton>
                           </td>
                         </tr>
                       );
@@ -5427,7 +5531,7 @@ function UserMappingUsageDialog({
               <span>{t('该用户尚未同步消耗数据')}</span>
             )}
           </div>
-          <button
+          <ActionButton
             className="ghost-button compact"
             disabled={loading || syncing}
             onClick={() => void syncUsage()}
@@ -5436,7 +5540,7 @@ function UserMappingUsageDialog({
           >
             <RefreshCcw className={syncing ? 'spin' : undefined} size={15} />
             {t(syncing ? '同步中...' : '同步')}
-          </button>
+          </ActionButton>
         </div>
       </DialogContent>
       {syncError && (
@@ -5448,9 +5552,9 @@ function UserMappingUsageDialog({
               <DialogDescription>{syncError}</DialogDescription>
             </DialogHeader>
             <div className="action-row">
-              <button className="primary-button compact" type="button" onClick={() => setSyncError('')}>
+              <ActionButton className="primary-button compact" type="button" onClick={() => setSyncError('')}>
                 {t('知道了')}
-              </button>
+              </ActionButton>
             </div>
           </DialogContent>
         </Dialog>
@@ -5492,7 +5596,7 @@ function constrainSettlementAmount(value: string, maximum: string, previous: str
 }
 
 function MappingSettlementDialog({ mapping, items, onClose, onSaved }: {
-  mapping: UserMapping;
+  mapping: Pick<UserMapping, 'public_username' | 'upstream_user_id'>;
   items: UserChannelUsageSnapshot['categories'];
   onClose: () => void;
   onSaved: (categories: Array<{ category: string; settledAmount: string; outstandingAmount: string; ratePercent: string }>) => void;
@@ -5583,10 +5687,10 @@ function MappingSettlementDialog({ mapping, items, onClose, onSaved }: {
           </div>
           <NoticeBanner notice={error ? { type: 'error', text: error } : null} />
           <div className="account-dialog-actions">
-            <button className="ghost-button" type="button" disabled={saving} onClick={onClose}>{t('取消')}</button>
-            <button className="primary-button compact" type="submit" disabled={saving}>
+            <ActionButton className="ghost-button" type="button" disabled={saving} onClick={onClose}>{t('取消')}</ActionButton>
+            <ActionButton className="primary-button compact" type="submit" disabled={saving}>
               {saving && <Loader2 className="spin" size={15} />}{t(saving ? '保存中...' : '确认结算')}
-            </button>
+            </ActionButton>
           </div>
         </form>
       </DialogContent>
@@ -5631,73 +5735,76 @@ function DeleteUserMappingDialog({ mapping, onClose, onDeleted }: {
           {error && <p className="account-dialog-error" role="alert">{error}</p>}
         </div>
         <footer className="channel-confirm-footer">
-          <button className="ghost-button" disabled={deleting} onClick={onClose} type="button">{t('取消')}</button>
-          <button className="channel-confirm-submit danger" disabled={deleting} onClick={() => void remove()} type="button">
+          <ActionButton className="ghost-button" disabled={deleting} onClick={onClose} type="button">{t('取消')}</ActionButton>
+          <ActionButton className="channel-confirm-submit danger" disabled={deleting} onClick={() => void remove()} type="button">
             {deleting && <Loader2 className="spin" size={15} />}
             {t(deleting ? '正在删除...' : '删除')}
-          </button>
+          </ActionButton>
         </footer>
       </DialogContent>
     </Dialog>
   );
 }
 
-function UserMappingSettlementsDialog({ mapping, onClose }: {
-  mapping: UserMapping;
-  onClose: () => void;
+function SettlementTransactionList({ transactions, onDelete }: {
+  transactions: SettlementTransaction[];
+  onDelete?: (transaction: SettlementTransaction) => Promise<void>;
 }) {
   const { language, t } = useLanguage();
-  const [transactions, setTransactions] = useState<SettlementTransaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [attempt, setAttempt] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError('');
-    api<CategoryRateResponse>(`/api/user-mappings/${encodeURIComponent(mapping.public_username)}/category-rates`, {
-      fresh: true, signal: controller.signal,
-    }).then(data => {
-      if (!controller.signal.aborted) setTransactions(data.settlementTransactions || []);
-    }).catch(failure => {
-      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
-    }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
-    });
-    return () => controller.abort();
-  }, [mapping.public_username, attempt, t]);
+  const [confirmId, setConfirmId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
+  const deletingRef = useRef(false);
+  async function remove(transaction: SettlementTransaction) {
+    if (!onDelete || deletingRef.current) return;
+    deletingRef.current = true;
+    setDeleting(true);
+    setDeleteError('');
+    try {
+      await onDelete(transaction);
+      setConfirmId(null);
+    } catch (failure) {
+      setDeleteError(failure instanceof Error ? failure.message : t('删除结算失败'));
+    } finally {
+      deletingRef.current = false;
+      setDeleting(false);
+    }
+  }
   return (
-    <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
-      <DialogContent className="user-usage-dialog mapping-settlements-dialog" showCloseButton={false}>
-        <div className="user-usage-dialog-header">
-          <DialogHeader>
-            <DialogTitle>{t('查看结算')}</DialogTitle>
-            <DialogDescription>{mapping.public_username} · ID {mapping.upstream_user_id ?? '-'}</DialogDescription>
-          </DialogHeader>
-          <DialogClose aria-label={t('关闭')} className="user-usage-close" type="button"><X size={18} /></DialogClose>
-        </div>
-        <div className="user-usage-dialog-body" aria-busy={loading}>
-          {loading ? (
-            <div className="user-usage-state" role="status"><Loader2 className="spin" size={24} />{t('正在加载结算数据')}</div>
-          ) : error ? (
-            <div className="user-usage-state error" role="alert">
-              <AlertTriangle size={24} /><p>{error}</p>
-              <button className="ghost-button compact" type="button" onClick={() => setAttempt(value => value + 1)}>{t('重试')}</button>
-            </div>
-          ) : transactions.length ? (
-            <div className="settlement-transaction-list">
-              {transactions.map(transaction => (
-                <section className="settlement-transaction-card" key={transaction.id}>
-                  <header className="settlement-transaction-header">
-                    <div>
-                      <strong>{formatBeijingDateTime(transaction.createdAt, language)}</strong>
-                      <span>{t(transaction.legacy ? '历史记录' : '交易编号')}：{transaction.id}</span>
-                    </div>
-                    <div className="settlement-transaction-total">
-                      <span>{t('本次交易结算总金额')}</span>
-                      <strong>${formatNumericText(transaction.totalSettlementAmount)}</strong>
-                    </div>
-                  </header>
+    <div className="table-wrap settlement-transactions-wrap" role="region" aria-label={t('结算记录')} tabIndex={0}>
+      <table className="settlement-transactions-table">
+        <thead><tr>
+          <th scope="col">{t('交易编号')}</th>
+          <th scope="col">{t('付款人')}</th>
+          <th scope="col">{t('收款人')}</th>
+          <th scope="col">{t('结算金额')}（USD）</th>
+          <th scope="col">{t('操作')}</th>
+        </tr></thead>
+        <tbody>{transactions.map(transaction => (
+          <tr key={transaction.id}>
+            <td><code className="settlement-table-id">{transaction.id}</code></td>
+            <td><strong>{transaction.payer?.username || t('未记录')}</strong>
+              {transaction.payer?.displayName && transaction.payer.displayName !== transaction.payer.username && <small>{transaction.payer.displayName}</small>}
+            </td>
+            <td><strong>{transaction.payee?.username || t('未记录')}</strong>
+              {transaction.payee?.displayName && transaction.payee.displayName !== transaction.payee.username && <small>{transaction.payee.displayName}</small>}
+            </td>
+            <td className="settlement-table-amount">${formatNumericText(transaction.totalSettlementAmount)}</td>
+            <td><div className="settlement-table-actions">
+              <Dialog>
+                <DialogTrigger disabled={deleting} render={<ActionButton className="ghost-button compact" type="button" />}>
+                  <Eye size={15} />{t('查看详情')}
+                </DialogTrigger>
+                <DialogContent className="user-usage-dialog mapping-settlements-dialog settlement-details-dialog" showCloseButton={false} overlayProps={{ forceRender: true, className: 'settlement-details-overlay' }}>
+                  <div className="user-usage-dialog-header">
+                    <DialogHeader>
+                      <DialogTitle>{t('查看支付渠道详情')}</DialogTitle>
+                      <DialogDescription>{t('交易编号')}：{transaction.id}</DialogDescription>
+                    </DialogHeader>
+                    <DialogClose aria-label={t('关闭')} className="user-usage-close" type="button"><X size={18} /></DialogClose>
+                  </div>
+                  <div className="user-usage-dialog-body">
+                    <section className="settlement-transaction-card">
                   <div className="table-wrap" role="region" aria-label={`${t('交易编号')} ${transaction.id}`} tabIndex={0}>
                     <table className="mapping-settlements-table">
                       <thead><tr>
@@ -5714,17 +5821,167 @@ function UserMappingSettlementsDialog({ mapping, onClose }: {
                       ))}</tbody>
                     </table>
                   </div>
-                  {transaction.legacy && <p className="settlement-transaction-legacy">{t('旧记录未保存交易编号，按原记录单独展示。')}</p>}
-                </section>
-              ))}
+
+                    </section>
+                  </div>
+                </DialogContent>
+              </Dialog>
+              {onDelete && (
+                    <AlertDialog open={confirmId === transaction.id} onOpenChange={open => {
+                      if (deletingRef.current) return;
+                      setConfirmId(open ? transaction.id : null);
+                      setDeleteError('');
+                    }}>
+                      <AlertDialogTrigger disabled={deleting} render={<ActionButton className="ghost-button compact settlement-delete-button" type="button" />}>
+                        <Trash2 size={15} />{t('删除结算')}
+                      </AlertDialogTrigger>
+                      <AlertDialogContent className="settlement-delete-dialog" overlayProps={{ forceRender: true, className: 'settlement-delete-overlay' }}>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>{t('删除结算')}</AlertDialogTitle>
+                          <AlertDialogDescription>{t('删除后，本笔消耗额度将退回待结算，其他结算记录保持不变。')}</AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <div className="settlement-delete-summary">
+                          <span>{formatBeijingDateTime(transaction.createdAt, language)}</span>
+                          <strong>${formatNumericText(transaction.totalSettlementAmount)}</strong>
+                        </div>
+                        {deleteError && <p role="alert" className="settlement-delete-error">{deleteError}</p>}
+                        <AlertDialogFooter>
+                          <AlertDialogCancel autoFocus disabled={deleting}>{t('取消')}</AlertDialogCancel>
+                          <AlertDialogAction variant="destructive" disabled={deleting} onClick={() => void remove(transaction)}>
+                            {deleting && <Loader2 size={15} className="spin" />}{t('确定')}
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+
+              )}
+            </div></td>
+          </tr>
+        ))}</tbody>
+      </table>
+    </div>
+  );
+}
+
+function SettlementHistoryView() {
+  const { t } = useLanguage();
+  const [transactions, setTransactions] = useState<SettlementTransaction[]>([]);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    api<{ items: SettlementTransaction[]; hasMore: boolean }>(`/api/settlement-history?page=${page}`, {
+      fresh: true, signal: controller.signal,
+    }).then(data => {
+      if (!controller.signal.aborted) {
+        setTransactions(data.items);
+        setHasMore(data.hasMore);
+      }
+    }).catch(failure => {
+      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [page, attempt, t]);
+  return (
+    <section className="settlement-history-page" aria-busy={loading}>
+      <div className="daily-stats-toolbar">
+        <div><h1>{t('结算历史')}</h1><p>{t('查看当前账户的结算交易与分类明细。')}</p></div>
+        <ActionButton className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>
+          <RefreshCcw size={15} className={loading ? 'spin' : undefined} />{t('刷新')}
+        </ActionButton>
+      </div>
+      {loading ? (
+        <div className="user-usage-state" role="status"><Loader2 className="spin" size={24} />{t('正在加载结算数据')}</div>
+      ) : error ? (
+        <div className="user-usage-state error" role="alert"><AlertTriangle size={24} /><p>{error}</p>
+          <ActionButton className="ghost-button compact" type="button" onClick={() => setAttempt(value => value + 1)}>{t('重试')}</ActionButton>
+        </div>
+      ) : transactions.length ? <SettlementTransactionList transactions={transactions} /> : (
+        <div className="user-usage-state"><Database size={26} /><span>{t('暂无结算记录')}</span></div>
+      )}
+      <div className="settlement-history-pagination">
+        <ActionButton className="ghost-button compact" type="button" disabled={loading || page <= 1} onClick={() => setPage(value => value - 1)}>{t('上一页')}</ActionButton>
+        <span>{t('第 {{page}} 页', { page })}</span>
+        <ActionButton className="ghost-button compact" type="button" disabled={loading || !!error || !hasMore} onClick={() => setPage(value => value + 1)}>{t('下一页')}</ActionButton>
+      </div>
+    </section>
+  );
+}
+
+function UserMappingSettlementsDialog({ mapping, onClose }: {
+  mapping: Pick<UserMapping, 'public_username' | 'upstream_user_id'>;
+  onClose: () => void;
+}) {
+  const { t } = useLanguage();
+  const [transactions, setTransactions] = useState<SettlementTransaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  const [page, setPage] = useState(1);
+  const [hasMore, setHasMore] = useState(false);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    api<{ items: SettlementTransaction[]; hasMore: boolean }>(`/api/user-mappings/${encodeURIComponent(mapping.public_username)}/settlements?page=${page}`, {
+      fresh: true, signal: controller.signal,
+    }).then(data => {
+      if (!controller.signal.aborted) {
+        setTransactions(data.items);
+        setHasMore(data.hasMore);
+        if (!data.items.length && page > 1) setPage(value => value - 1);
+      }
+    }).catch(failure => {
+      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [mapping.public_username, page, attempt, t]);
+  return (
+    <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+      <DialogContent className="user-usage-dialog mapping-settlements-dialog" showCloseButton={false}>
+        <div className="user-usage-dialog-header">
+          <DialogHeader>
+            <DialogTitle>{t('查看结算')}</DialogTitle>
+            <DialogDescription>{mapping.public_username} · ID {mapping.upstream_user_id ?? '-'}</DialogDescription>
+          </DialogHeader>
+          <DialogClose aria-label={t('关闭')} className="user-usage-close" type="button"><X size={18} /></DialogClose>
+        </div>
+        <div className="user-usage-dialog-body" aria-busy={loading}>
+          {loading ? (
+            <div className="user-usage-state" role="status"><Loader2 className="spin" size={24} />{t('正在加载结算数据')}</div>
+          ) : error ? (
+            <div className="user-usage-state error" role="alert">
+              <AlertTriangle size={24} /><p>{error}</p>
+              <ActionButton className="ghost-button compact" type="button" onClick={() => setAttempt(value => value + 1)}>{t('重试')}</ActionButton>
             </div>
+          ) : transactions.length ? (
+            <SettlementTransactionList transactions={transactions} onDelete={async transaction => {
+              await api(`/api/user-mappings/${encodeURIComponent(mapping.public_username)}/settlements/${encodeURIComponent(transaction.id)}`, { method: 'DELETE' });
+              setTransactions(current => current.filter(item => item.id !== transaction.id));
+              if (transactions.length === 1 && page > 1) setPage(value => value - 1);
+              else setAttempt(value => value + 1);
+            }} />
           ) : <div className="user-usage-state"><Database size={26} /><span>{t('暂无结算记录')}</span></div>}
         </div>
         <div className="user-usage-dialog-footer">
-          <span className="user-usage-footer-status">{t('显示最近100笔交易')}</span>
-          <button className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>
+          <span className="user-usage-footer-status">{t('每页10笔交易')}</span>
+          <div className="settlement-dialog-pagination">
+            <ActionButton className="ghost-button compact" type="button" disabled={loading || page <= 1} onClick={() => setPage(value => value - 1)}>{t('上一页')}</ActionButton>
+            <span>{t('第 {{page}} 页', { page })}</span>
+            <ActionButton className="ghost-button compact" type="button" disabled={loading || !!error || !hasMore} onClick={() => setPage(value => value + 1)}>{t('下一页')}</ActionButton>
+          </div>
+          <ActionButton className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>
             <RefreshCcw size={15} className={loading ? 'spin' : undefined} />{t('刷新')}
-          </button>
+          </ActionButton>
         </div>
       </DialogContent>
     </Dialog>
@@ -5801,23 +6058,14 @@ function UserMappingsView() {
 
   return (
     <section className="user-mappings-page">
-      <PageHeading
-        action={(
-          <div className="action-row">
-            <button className="ghost-button compact" onClick={() => void load(true)} type="button">
-              <RefreshCcw size={17} />
-              {t('刷新')}
-            </button>
-            <button className="primary-button compact" onClick={() => setCreateOpen(true)} type="button">
-              <Plus size={17} />
-              {t('新增映射')}
-            </button>
-          </div>
-        )}
-        icon={Users}
-        subtitle={t('管理用户名与 GYS 用户名的映射关系。')}
-        title={t('用户映射')}
-      />
+      <div className="user-mappings-toolbar">
+        <ActionButton className="ghost-button compact" onClick={() => void load(true)} type="button">
+          <RefreshCcw size={17} />{t('刷新')}
+        </ActionButton>
+        <ActionButton className="primary-button compact" onClick={() => setCreateOpen(true)} type="button">
+          <Plus size={17} />{t('新增映射')}
+        </ActionButton>
+      </div>
       <NoticeBanner notice={notice} />
       <div className="panel user-mappings-panel">
         {loading ? (
@@ -5867,19 +6115,19 @@ function UserMappingsView() {
                     <td>{item.data_synced_at ? formatBeijingDateTime(item.data_synced_at, language) : '—'}</td>
                     <td>
                       <div className="user-mapping-actions">
-                        {item.account_kind === 'primary' && <button className="user-mapping-edit-button" type="button"
+                        {item.account_kind === 'primary' && <ActionButton className="user-mapping-edit-button" type="button"
                           disabled={togglingSync !== null} onClick={() => void toggleSync(item)}>
                           <RefreshCcw size={14} />{t(item.sync_enabled ? '禁用同步' : '启用同步')}
-                        </button>}
-                        <button
+                        </ActionButton>}
+                        <ActionButton
                           aria-label={t('查看 {{name}} 的结算记录', { name: item.public_username })}
                           className="user-mapping-edit-button"
                           onClick={() => setSettlementMapping(item)}
                           type="button"
                         >
                           <Eye size={14} />{t('查看结算')}
-                        </button>
-                        <button
+                        </ActionButton>
+                        <ActionButton
                           aria-label={t('为 {{name}} 设置汇率', { name: item.public_username })}
                           className="user-mapping-edit-button"
                           onClick={() => setRateMapping(item)}
@@ -5887,8 +6135,8 @@ function UserMappingsView() {
                         >
                           <CircleDollarSign size={14} />
                           {t('设置汇率')}
-                        </button>
-                        <button
+                        </ActionButton>
+                        <ActionButton
                           aria-label={t('查看 {{name}} 的分类消耗', { name: item.public_username })}
                           className="user-mapping-usage-button"
                           onClick={() => setUsageMapping(item)}
@@ -5896,8 +6144,8 @@ function UserMappingsView() {
                         >
                           <BarChart3 size={14} />
                           {t('查看分类消耗')}
-                        </button>
-                        <button
+                        </ActionButton>
+                        <ActionButton
                           aria-label={t('编辑 {{name}}', { name: item.public_username })}
                           className="user-mapping-edit-button"
                           onClick={() => setEditingMapping(item)}
@@ -5905,8 +6153,8 @@ function UserMappingsView() {
                         >
                           <Pencil size={14} />
                           {t('编辑')}
-                        </button>
-                        <button
+                        </ActionButton>
+                        <ActionButton
                           aria-label={t('删除 {{name}}', { name: item.public_username })}
                           className="user-mapping-delete-button"
                           onClick={() => setDeletingMapping(item)}
@@ -5914,7 +6162,7 @@ function UserMappingsView() {
                         >
                           <Trash2 size={14} />
                           {t('删除')}
-                        </button>
+                        </ActionButton>
                       </div>
                     </td>
                   </tr>
@@ -6065,17 +6313,12 @@ function ModelGapsView() {
           <span>{copyToast.text}</span>
         </div>
       )}
-      <PageHeading
-        icon={Zap}
-        title={t('模型缺口')}
-        subtitle={t('当前模型供应缺口。')}
-        action={
-          <div className="action-row model-gap-actions">
-            <button className="ghost-button" onClick={copyReport} type="button">
+      <div className="page-actions-toolbar">
+            <ActionButton className="ghost-button" onClick={copyReport} type="button">
               <ClipboardCopy size={17} />
               {t('复制通知')}
-            </button>
-            <button
+            </ActionButton>
+            <ActionButton
               className="primary-button compact"
               disabled={loading || refreshing}
               onClick={() => void load(true)}
@@ -6083,10 +6326,8 @@ function ModelGapsView() {
             >
               <RefreshCcw className={loading || refreshing ? 'spin' : undefined} size={17} />
               {t('刷新')}
-            </button>
+            </ActionButton>
           </div>
-        }
-      />
       <NoticeBanner notice={notice} />
       <div className="panel">
         {loading ? (
@@ -6138,6 +6379,8 @@ function AnnouncementManagementView() {
   const [items, setItems] = useState<AnnouncementItem[]>([]);
   const [title, setTitle] = useState('');
   const [content, setContent] = useState('');
+  const [titleEn, setTitleEn] = useState('');
+  const [contentEn, setContentEn] = useState('');
   const [composeOpen, setComposeOpen] = useState(false);
   const [publishError, setPublishError] = useState('');
   const [loading, setLoading] = useState(true);
@@ -6182,18 +6425,28 @@ function AnnouncementManagementView() {
     event.preventDefault();
     const nextTitle = title.trim();
     const nextContent = content.trim();
-    if (!nextTitle || !nextContent || publishing) return;
+    const nextTitleEn = titleEn.trim();
+    const nextContentEn = contentEn.trim();
+    if (!nextTitle || !nextContent || !nextTitleEn || !nextContentEn || publishing) return;
 
     setPublishing(true);
     setPublishError('');
     setNotice(null);
     try {
+      const payload: AnnouncementCreatePayload = {
+        titleZh: nextTitle,
+        contentZh: nextContent,
+        titleEn: nextTitleEn,
+        contentEn: nextContentEn,
+      };
       await api<AnnouncementItem>('/api/announcement-management', {
         method: 'POST',
-        body: { title: nextTitle, content: nextContent },
+        body: payload,
       });
       setTitle('');
       setContent('');
+      setTitleEn('');
+      setContentEn('');
       await load(true);
       closeCompose();
       setNotice({ type: 'ok', text: t('公告发布成功') });
@@ -6273,17 +6526,12 @@ function AnnouncementManagementView() {
           <span>{notice.text}</span>
         </div>
       )}
-      <PageHeading
-        icon={Megaphone}
-        title={t('公告管理')}
-        subtitle={t('发布和管理站内公告。')}
-        action={
-          <div className="announcement-heading-actions">
-            <button className="ghost-button compact" disabled={loading} onClick={() => load(true)} type="button">
+      <div className="page-actions-toolbar">
+            <ActionButton className="ghost-button compact" disabled={loading} onClick={() => load(true)} type="button">
               <RefreshCcw className={loading ? 'spin' : ''} size={17} />
               {t('刷新')}
-            </button>
-            <button
+            </ActionButton>
+            <ActionButton
               className="primary-button compact"
               onClick={() => {
                 setPublishError('');
@@ -6294,10 +6542,8 @@ function AnnouncementManagementView() {
             >
               <Plus size={16} />
               {t('添加公告')}
-            </button>
+            </ActionButton>
           </div>
-        }
-      />
       <section className="panel announcement-list-panel">
         <div className="panel-title">
           <h2>{t('管理现有公告')}</h2>
@@ -6310,44 +6556,47 @@ function AnnouncementManagementView() {
           </div>
         ) : items.length ? (
           <div className="announcement-management-list">
-            {items.map(item => (
-              <article className="announcement-management-item" key={item.id}>
-                <header>
-                  <h3>{item.title}</h3>
-                  <Badge tone={item.published ? 'green' : 'neutral'}>
-                    {t(item.published ? '已发布' : '已下架')}
-                  </Badge>
-                </header>
-                <p>{item.content}</p>
-                <footer>
-                  <div className="announcement-management-actions">
-                    <button
-                      className="ghost-button compact"
-                      disabled={busyId !== null}
-                      onClick={() => togglePublished(item)}
-                      type="button"
-                    >
-                      {busyId === item.id ? (
-                        <Loader2 className="spin" size={15} />
-                      ) : item.published ? (
-                        <EyeOff size={15} />
-                      ) : (
-                        <Eye size={15} />
-                      )}
-                      {t(item.published ? '下架' : '重新发布')}
-                    </button>
-                    <button
-                      className="danger-button compact"
-                      disabled={busyId !== null}
-                      onClick={() => openDelete(item)}
-                      type="button"
-                    >
-                      <Trash2 size={15} />{t('删除')}
-                    </button>
-                  </div>
-                </footer>
-              </article>
-            ))}
+            {items.map(item => {
+              const itemCopy = localizedAnnouncement(item, language);
+              return (
+                <article className="announcement-management-item" key={item.id}>
+                  <header>
+                    <h3>{itemCopy.title}</h3>
+                    <Badge tone={item.published ? 'green' : 'neutral'}>
+                      {t(item.published ? '已发布' : '已下架')}
+                    </Badge>
+                  </header>
+                  <p>{itemCopy.content}</p>
+                  <footer>
+                    <div className="announcement-management-actions">
+                      <ActionButton
+                        className="ghost-button compact"
+                        disabled={busyId !== null}
+                        onClick={() => togglePublished(item)}
+                        type="button"
+                      >
+                        {busyId === item.id ? (
+                          <Loader2 className="spin" size={15} />
+                        ) : item.published ? (
+                          <EyeOff size={15} />
+                        ) : (
+                          <Eye size={15} />
+                        )}
+                        {t(item.published ? '下架' : '重新发布')}
+                      </ActionButton>
+                      <ActionButton
+                        className="danger-button compact"
+                        disabled={busyId !== null}
+                        onClick={() => openDelete(item)}
+                        type="button"
+                      >
+                        <Trash2 size={15} />{t('删除')}
+                      </ActionButton>
+                    </div>
+                  </footer>
+                </article>
+              );
+            })}
           </div>
         ) : (
           <EmptyState
@@ -6372,59 +6621,94 @@ function AnnouncementManagementView() {
           <div className="announcement-compose-dialog-header">
             <DialogHeader>
               <DialogTitle>{t('添加公告')}</DialogTitle>
-              <DialogDescription>{t('填写公告内容，发布后会显示在顶部通知中。')}</DialogDescription>
+              <DialogDescription>{t('分别填写中文和英文公告，用户将看到与当前语言一致的内容。')}</DialogDescription>
             </DialogHeader>
             <DialogClose aria-label={t('关闭')} className="announcement-compose-close" disabled={publishing}>
               <X size={18} />
             </DialogClose>
           </div>
           <form aria-busy={publishing} className="announcement-compose-form" onSubmit={publish}>
-            <label>
-              <span className="announcement-field-heading">
-                <span>{t('公告标题')}</span>
-                <small>{title.length}/120 {t('字符')}</small>
-              </span>
-              <input
-                autoFocus
-                maxLength={120}
-                onChange={event => setTitle(event.target.value)}
-                placeholder={t('请输入公告标题')}
-                required
-                value={title}
-              />
-            </label>
-            <label>
-              <span className="announcement-field-heading">
-                <span>{t('公告内容')}</span>
-                <small>{content.length}/5000 {t('字符')}</small>
-              </span>
-              <textarea
-                maxLength={5000}
-                onChange={event => setContent(event.target.value)}
-                placeholder={t('请输入公告内容')}
-                required
-                rows={9}
-                value={content}
-              />
-            </label>
+            <div className="announcement-language-grid">
+              <fieldset className="announcement-language-panel">
+                <legend>{t('中文版本')}</legend>
+                <label>
+                  <span className="announcement-field-heading">
+                    <span>{t('中文标题')}</span>
+                    <small>{title.length}/120 {t('字符')}</small>
+                  </span>
+                  <input
+                    autoFocus
+                    maxLength={120}
+                    onChange={event => setTitle(event.target.value)}
+                    placeholder={t('请输入中文公告标题')}
+                    required
+                    value={title}
+                  />
+                </label>
+                <label>
+                  <span className="announcement-field-heading">
+                    <span>{t('中文内容')}</span>
+                    <small>{content.length}/5000 {t('字符')}</small>
+                  </span>
+                  <textarea
+                    maxLength={5000}
+                    onChange={event => setContent(event.target.value)}
+                    placeholder={t('请输入中文公告内容')}
+                    required
+                    rows={7}
+                    value={content}
+                  />
+                </label>
+              </fieldset>
+              <fieldset className="announcement-language-panel">
+                <legend>{t('英文版本')}</legend>
+                <label>
+                  <span className="announcement-field-heading">
+                    <span>{t('英文标题')}</span>
+                    <small>{titleEn.length}/120 {t('字符')}</small>
+                  </span>
+                  <input
+                    maxLength={120}
+                    onChange={event => setTitleEn(event.target.value)}
+                    placeholder={t('请输入英文公告标题')}
+                    required
+                    value={titleEn}
+                  />
+                </label>
+                <label>
+                  <span className="announcement-field-heading">
+                    <span>{t('英文内容')}</span>
+                    <small>{contentEn.length}/5000 {t('字符')}</small>
+                  </span>
+                  <textarea
+                    maxLength={5000}
+                    onChange={event => setContentEn(event.target.value)}
+                    placeholder={t('请输入英文公告内容')}
+                    required
+                    rows={7}
+                    value={contentEn}
+                  />
+                </label>
+              </fieldset>
+            </div>
             {publishError && <p className="announcement-publish-error" role="alert">{publishError}</p>}
             <div className="announcement-compose-actions">
-              <button
+              <ActionButton
                 className="ghost-button compact"
                 disabled={publishing}
                 onClick={closeCompose}
                 type="button"
               >
                 {t('取消')}
-              </button>
-              <button
+              </ActionButton>
+              <ActionButton
                 className="primary-button compact announcement-publish-button"
-                disabled={publishing || !title.trim() || !content.trim()}
+                disabled={publishing || !title.trim() || !content.trim() || !titleEn.trim() || !contentEn.trim()}
                 type="submit"
               >
                 {publishing ? <Loader2 className="spin" size={16} /> : <Megaphone size={16} />}
                 {t(publishing ? '发布中...' : '发布公告')}
-              </button>
+              </ActionButton>
             </div>
           </form>
         </DialogContent>
@@ -6444,426 +6728,25 @@ function AnnouncementManagementView() {
             <DialogTitle>{t('删除公告')}</DialogTitle>
             <DialogDescription>
               {pendingDelete
-                ? t('确定删除公告“{{title}}”吗？删除后无法恢复。', { title: pendingDelete.title })
+                ? t('确定删除公告“{{title}}”吗？删除后无法恢复。', {
+                    title: localizedAnnouncement(pendingDelete, language).title,
+                  })
                 : ''}
             </DialogDescription>
           </DialogHeader>
           {deleteError && <p className="account-dialog-error" role="alert">{deleteError}</p>}
           <div className="announcement-delete-actions">
-            <button className="ghost-button compact" disabled={deleting} onClick={() => setPendingDelete(null)} type="button">
+            <ActionButton className="ghost-button compact" disabled={deleting} onClick={() => setPendingDelete(null)} type="button">
               {t('取消')}
-            </button>
-            <button className="danger-button compact solid" disabled={deleting} onClick={removeAnnouncement} type="button">
+            </ActionButton>
+            <ActionButton className="danger-button compact solid" disabled={deleting} onClick={removeAnnouncement} type="button">
               {deleting && <Loader2 className="spin" size={15} />}
               {t(deleting ? '正在删除...' : '删除')}
-            </button>
+            </ActionButton>
           </div>
         </DialogContent>
       </Dialog>
     </section>
-  );
-}
-
-function SubAccountSettlementDialog({
-  account,
-  onClose,
-}: {
-  account: SubAccount;
-  onClose: () => void;
-}) {
-  const { language, t } = useLanguage();
-  const [attempt, setAttempt] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [syncing, setSyncing] = useState(false);
-  const [summary, setSummary] = useState<SubAccountSettlementSummary | null>(null);
-  const [records, setRecords] = useState<SettlementRecord[]>([]);
-  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const [consumptionAmounts, setConsumptionAmounts] = useState<Record<string, string>>({});
-  const [error, setError] = useState('');
-  const [notice, setNotice] = useState('');
-
-  const categoryStatsByCategory = useMemo(
-    () => new Map(summary?.categories.map((item) => [item.category, item]) || []),
-    [summary],
-  );
-  const selectableCategories = channelUsageCategories.filter((category) => {
-    const stats = categoryStatsByCategory.get(category);
-    return Math.floor(Math.max(0, Number(stats?.amount || 0) - Number(stats?.settledAmount || 0))) > 0;
-  });
-  const selectedCategoryRows = selectedCategories.map((category) => {
-    const stats = categoryStatsByCategory.get(category);
-    const totalAmount = Number(stats?.amount || 0);
-    const settledAmount = Number(stats?.settledAmount || 0);
-    const availableAmount = Math.floor(Math.max(0, totalAmount - settledAmount));
-    const ratePercent = Number(stats?.ratePercent || 100);
-    const consumptionAmount = Math.max(0, Number(consumptionAmounts[category]) || 0);
-    return {
-      category,
-      totalAmount,
-      availableAmount,
-      ratePercent,
-      consumptionAmount,
-      settlementAmount: consumptionAmount * ratePercent / 100,
-    };
-  });
-  const selectedTotalAmount = selectedCategoryRows.reduce((total, item) => total + item.totalAmount, 0);
-  const selectedAvailableAmount = selectedCategoryRows.reduce((total, item) => total + item.availableAmount, 0);
-  const selectedSettlementAmount = selectedCategoryRows.reduce((total, item) => total + item.settlementAmount, 0);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError('');
-    setNotice('');
-    api<SubAccountSettlementDataResponse>(`/api/sub-accounts/${account.id}/category-rates?include_settlement=1`, {
-      fresh: true,
-      signal: controller.signal,
-    })
-      .then((value) => {
-        if (controller.signal.aborted) return;
-        setSummary(value.settlementSummary);
-        setRecords(value.settlementRecords || []);
-      })
-      .catch((failure) => {
-        if (!controller.signal.aborted) {
-          setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [account.id, attempt, t]);
-
-  useEffect(() => {
-    if (!summary) return;
-    const statsByCategory = new Map(summary.categories.map((item) => [item.category, item]));
-    const nextAmounts: Record<string, string> = {};
-    const nextSelectableCategories = channelUsageCategories.filter((category) => {
-      const stats = statsByCategory.get(category);
-      const available = Math.floor(Math.max(0, Number(stats?.amount || 0) - Number(stats?.settledAmount || 0)));
-      nextAmounts[category] = available.toFixed(0);
-      return available > 0;
-    });
-    setConsumptionAmounts(nextAmounts);
-    setSelectedCategories((current) => {
-      const selectable = new Set(nextSelectableCategories);
-      return current.filter((category) => selectable.has(category));
-    });
-    setError('');
-  }, [summary]);
-
-  async function syncUsage() {
-    setSyncing(true);
-    setError('');
-    setNotice('');
-    try {
-      const value = await api<SubAccountSettlementSummary>(
-        `/api/sub-accounts/${account.id}/settlement-usage/sync`,
-        { method: 'POST' },
-      );
-      setSummary(value);
-      setNotice(t('同步用量成功'));
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : t('同步用量失败'));
-    } finally {
-      setSyncing(false);
-    }
-  }
-
-  async function submit(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (selectedCategoryRows.length === 0) {
-      setError(t('请选择至少一个可结算分类'));
-      return;
-    }
-    const items: Array<{ category: string; consumptionAmount: string }> = [];
-    for (const item of selectedCategoryRows) {
-      const amountText = (consumptionAmounts[item.category] || '').trim();
-      const amount = Number(amountText);
-      if (!Number.isSafeInteger(amount) || amount <= 0) {
-        setError(`${categoryLabel(item.category, language)}：${t('请输入有效的结算消耗额度')}`);
-        return;
-      }
-      if (amount > item.availableAmount + 0.0000001) {
-        setError(`${categoryLabel(item.category, language)}：${t('结算消耗额度不能超过可结算额度')}`);
-        return;
-      }
-      items.push({ category: item.category, consumptionAmount: amountText });
-    }
-    setSaving(true);
-    setError('');
-    setNotice('');
-    try {
-      const result = await api<BatchSettlementResponse>(`/api/sub-accounts/${account.id}/settlements`, {
-        method: 'POST',
-        body: { items },
-      });
-      setRecords((current) => [...result.settlements, ...current]);
-      setSummary(result.settlementSummary);
-      setSelectedCategories([]);
-      setNotice(t('批量结算成功，共 {{count}} 个分类，结算金额 ${{amount}}', {
-        count: result.settlements.length,
-        amount: result.totalSettlementAmount,
-      }));
-    } catch (failure) {
-      setError(failure instanceof Error ? failure.message : t('提交结算失败'));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  return (
-    <div
-      className="dialog-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !saving && !syncing) onClose();
-      }}
-      role="presentation"
-    >
-      <section
-        aria-labelledby="sub-account-settlement-title"
-        aria-modal="true"
-        className="account-dialog sub-account-settlement-dialog"
-        role="dialog"
-      >
-        <div className="account-dialog-header sub-account-rate-header">
-          <div>
-            <h2 id="sub-account-settlement-title"><CheckCircle2 size={20} />{t('渠道分类结算')}</h2>
-            <p>
-              {account.display_name || account.username} · ID {account.id}
-              {summary?.refreshedAt
-                ? ` · ${t('最近同步')}：${formatBeijingDateTime(summary.refreshedAt, language)}`
-                : ''}
-            </p>
-          </div>
-          <div className="sub-account-dialog-tools">
-            <button
-              aria-label={t('同步用量')}
-              className="sub-account-sync-button"
-              disabled={loading || saving || syncing}
-              onClick={syncUsage}
-              title={t('同步用量')}
-              type="button"
-            >
-              {syncing ? <Loader2 className="spin" size={16} /> : <Database size={16} />}
-              <span>{t(syncing ? '同步中...' : '同步用量')}</span>
-            </button>
-            <button
-              aria-label={t('刷新')}
-              disabled={loading || saving || syncing}
-              onClick={() => setAttempt((value) => value + 1)}
-              title={t('刷新')}
-              type="button"
-            >
-              <RefreshCcw className={loading ? 'spin' : ''} size={17} />
-            </button>
-            <button aria-label={t('关闭')} disabled={saving || syncing} onClick={onClose} title={t('关闭')} type="button">
-              <X size={19} />
-            </button>
-          </div>
-        </div>
-        {loading ? (
-          <div className="sub-account-rate-loading" role="status">
-            <Loader2 className="spin" size={22} />{t('正在加载结算数据')}
-          </div>
-        ) : !summary ? (
-          <div className="sub-account-rate-loading error" role="alert">
-            <AlertTriangle size={22} />{error || t('加载结算数据失败')}
-          </div>
-        ) : (
-          <form onSubmit={submit}>
-            <div className="sub-account-settlement-category">
-              <div className="sub-account-settlement-category-heading">
-                <span>{t('渠道分类')}</span>
-                <div>
-                  <button
-                    disabled={saving || syncing || selectableCategories.length === 0 || selectedCategories.length === selectableCategories.length}
-                    onClick={() => {
-                      setSelectedCategories([...selectableCategories]);
-                      setError('');
-                      setNotice('');
-                    }}
-                    type="button"
-                  >
-                    {t('选择全部可结算')}
-                  </button>
-                  <button
-                    disabled={saving || syncing || selectedCategories.length === 0}
-                    onClick={() => {
-                      setSelectedCategories([]);
-                      setError('');
-                      setNotice('');
-                    }}
-                    type="button"
-                  >
-                    {t('清空选择')}
-                  </button>
-                </div>
-              </div>
-              <Select
-                disabled={saving || syncing || !summary.available}
-                multiple
-                onValueChange={(value) => {
-                  const requested = new Set(value);
-                  const selectable = new Set(selectableCategories);
-                  setSelectedCategories(channelUsageCategories.filter(
-                    (item) => requested.has(item) && selectable.has(item),
-                  ));
-                  setError('');
-                  setNotice('');
-                }}
-                value={selectedCategories}
-              >
-                <SelectTrigger
-                  aria-label={`${t('渠道分类')}：${selectedCategories.length > 0
-                    ? t('已选择 {{count}} 个分类', { count: selectedCategories.length })
-                    : t('请选择结算分类')}`}
-                  className="sub-account-settlement-select-trigger"
-                >
-                  <SelectValue>
-                    {(value: string[]) => value.length > 0
-                      ? t('已选择 {{count}} 个分类', { count: value.length })
-                      : t('请选择结算分类')}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent
-                  align="start"
-                  alignItemWithTrigger={false}
-                  className="sub-account-settlement-select-content"
-                  positionerClassName="z-[70]"
-                  sideOffset={6}
-                >
-                  {channelUsageCategories.map((item) => {
-                    const stats = categoryStatsByCategory.get(item);
-                    const available = Math.max(
-                      0,
-                      Number(stats?.amount || 0) - Number(stats?.settledAmount || 0),
-                    );
-                    return (
-                      <SelectItem disabled={available <= 0} key={item} value={item}>
-                        <span className="sub-account-settlement-option">
-                          <strong>{categoryLabel(item, language)}</strong>
-                          <small>{t('总消耗')} ${stats?.amount || '0.0000'} · {t('可结算消耗')} ${available.toFixed(0)}</small>
-                        </span>
-                      </SelectItem>
-                    );
-                  })}
-                </SelectContent>
-              </Select>
-            </div>
-            {!summary.available && (
-              <p className="sub-account-rate-hint">{t('暂无已同步的消耗数据，请点击“同步用量”。')}</p>
-            )}
-            <div className="sub-account-settlement-summary">
-              <span><small>{t('已选分类')}</small><strong>{selectedCategories.length}</strong></span>
-              <span><small>{t('总消耗')}</small><strong>${selectedTotalAmount.toFixed(4)}</strong></span>
-              <span><small>{t('可结算消耗')}</small><strong>${selectedAvailableAmount.toFixed(0)}</strong></span>
-              <span><small>{t('本次结算金额')}</small><strong>${selectedSettlementAmount.toFixed(4)}</strong></span>
-            </div>
-            <section className="sub-account-settlement-items">
-              <h3>{t('本次结算明细')}</h3>
-              {selectedCategoryRows.length > 0 ? (
-                <div className="sub-account-settlement-item-list">
-                  {selectedCategoryRows.map((item) => (
-                    <div className="sub-account-settlement-item" key={item.category}>
-                      <span className="sub-account-settlement-item-name">
-                        <strong>{categoryLabel(item.category, language)}</strong>
-                        <small>{t('可结算 ${{amount}} · 汇率 {{rate}}%', {
-                          amount: item.availableAmount.toFixed(0),
-                          rate: item.ratePercent,
-                        })}</small>
-                      </span>
-                      <label>
-                        <span>{t('本次消耗额度')}</span>
-                        <span className="sub-account-rate-input prefix">
-                          <input
-                            aria-label={`${categoryLabel(item.category, language)} · ${t('本次消耗额度')}`}
-                            disabled={saving || syncing}
-                            inputMode="numeric"
-                            max={item.availableAmount.toFixed(0)}
-                            min="1"
-                            onChange={(event) => setConsumptionAmounts((current) => ({
-                              ...current,
-                              [item.category]: constrainSettlementAmount(event.target.value, item.availableAmount.toFixed(0), current[item.category] || ''),
-                            }))}
-                            required
-                            step="1"
-                            type="number"
-                            value={consumptionAmounts[item.category] || ''}
-                          />
-                          <b>$</b>
-                        </span>
-                      </label>
-                      <span className="sub-account-settlement-item-result">
-                        <small>{t('结算金额')}</small>
-                        <strong>${item.settlementAmount.toFixed(4)}</strong>
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="sub-account-settlement-items-empty">
-                  {t(selectableCategories.length > 0
-                    ? '请选择结算分类'
-                    : summary.available
-                      ? '暂无可结算分类'
-                      : '暂无已同步的消耗数据，请点击“同步用量”。')}
-                </p>
-              )}
-            </section>
-            <p className="sub-account-rate-hint">{t('本次结算金额 = 各分类消耗额度 × 对应结算汇率之和。')}</p>
-            <NoticeBanner notice={notice ? { type: 'ok', text: notice } : null} />
-            {error && <p className="account-dialog-error" role="alert">{error}</p>}
-            <section className="sub-account-settlement-history">
-              <h3>{t('结算记录')}</h3>
-              {records.length > 0 ? (
-                <div className="table-wrap sub-account-settlement-history-table-wrap">
-                  <table className="sub-account-settlement-history-table">
-                    <thead>
-                      <tr>
-                        <th>{t('结算时间')}</th>
-                        <th>{t('分类')}</th>
-                        <th>{t('消耗额度')}</th>
-                        <th>{t('结算汇率')}</th>
-                        <th>{t('结算金额')}</th>
-                        <th>{t('结算后累计')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {records.map((record) => (
-                        <tr key={record.id}>
-                          <td>{formatBeijingDateTime(record.createdAt, language)}</td>
-                          <td>{categoryLabel(record.category, language)}</td>
-                          <td>${record.consumptionAmount}</td>
-                          <td>{record.ratePercent}%</td>
-                          <td className={Number(record.settlementAmount) < 0 ? 'negative' : 'positive'}>
-                            ${record.settlementAmount}
-                          </td>
-                          <td>${record.settledAmount}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="sub-account-settlement-history-empty">{t('暂无结算记录')}</p>
-              )}
-            </section>
-            <div className="account-dialog-actions">
-              <button className="ghost-button" disabled={saving || syncing} onClick={onClose} type="button">{t('关闭')}</button>
-              <button className="primary-button compact" disabled={saving || syncing || selectedCategories.length === 0} type="submit">
-                {saving && <Loader2 className="spin" size={16} />}
-                {saving
-                  ? t('结算中...')
-                  : t('批量结算（{{count}}）', { count: selectedCategories.length })}
-              </button>
-            </div>
-          </form>
-        )}
-      </section>
-    </div>
   );
 }
 
@@ -6995,11 +6878,11 @@ function SubAccountRateDialog({
             </p>
             {error && <p className="account-dialog-error" role="alert">{error}</p>}
             <div className="account-dialog-actions">
-              <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</button>
-              <button className="primary-button compact" disabled={saving || !loaded} type="submit">
+              <ActionButton className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</ActionButton>
+              <ActionButton className="primary-button compact" disabled={saving || !loaded} type="submit">
                 {saving && <Loader2 className="spin" size={16} />}
                 {t(saving ? '保存中...' : '保存汇率')}
-              </button>
+              </ActionButton>
             </div>
           </form>
         )}
@@ -7023,7 +6906,7 @@ function CreateSubAccountDialog({
   onCreated: () => Promise<void>;
 }) {
   const { t } = useLanguage();
-  const [gysUsername, setGysUsername] = useState('');
+  const [publicUsername, setPublicUsername] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -7032,18 +6915,18 @@ function CreateSubAccountDialog({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const cleanGysUsername = gysUsername.trim();
+    const cleanPublicUsername = publicUsername.trim();
     const cleanDisplayName = displayName.trim();
-    if (!cleanGysUsername) {
-      setError(t('请输入GYS用户名'));
+    if (!cleanPublicUsername) {
+      setError(t('请输入本站用户名'));
       return;
     }
-    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanGysUsername)) {
-      setError(t('GYS用户名须为3至64位字母、数字、点、横线或下划线'));
+    if (!/^[A-Za-z0-9_.-]{3,64}$/.test(cleanPublicUsername)) {
+      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
       return;
     }
     if (!cleanDisplayName) {
-      setError(t('请输入显示名'));
+      setError(t('请输入本站显示名'));
       return;
     }
     if (!isStrongSubAccountPassword(password)) {
@@ -7056,7 +6939,7 @@ function CreateSubAccountDialog({
       await api('/api/sub-accounts', {
         method: 'POST',
         body: {
-          gys_username: cleanGysUsername,
+          public_username: cleanPublicUsername,
           display_name: cleanDisplayName,
           password,
         },
@@ -7091,26 +6974,26 @@ function CreateSubAccountDialog({
         </div>
         <form onSubmit={submit}>
           <label>
-            <span>{t('GYS用户名')}</span>
+            <span>{t('本站用户名')}</span>
             <input
               autoComplete="off"
               autoFocus
               maxLength={64}
               minLength={3}
-              onChange={event => setGysUsername(event.target.value)}
+              onChange={event => setPublicUsername(event.target.value)}
               pattern="[A-Za-z0-9_.-]{3,64}"
-              placeholder={t('GYS登录用户名')}
+              placeholder={t('本站用户名')}
               required
-              value={gysUsername}
+              value={publicUsername}
             />
           </label>
           <label>
-            <span>{t('显示名')}</span>
+            <span>{t('本站显示名')}</span>
             <input
               autoComplete="off"
               maxLength={128}
               onChange={event => setDisplayName(event.target.value)}
-              placeholder={t('显示名称')}
+              placeholder={t('本站显示名')}
               required
               value={displayName}
             />
@@ -7139,13 +7022,13 @@ function CreateSubAccountDialog({
           </label>
           {error && <p className="account-dialog-error" role="alert">{error}</p>}
           <div className="account-dialog-actions">
-            <button className="ghost-button" disabled={saving} onClick={onClose} type="button">
+            <ActionButton className="ghost-button" disabled={saving} onClick={onClose} type="button">
               {t('取消')}
-            </button>
-            <button className="primary-button compact" disabled={saving} type="submit">
+            </ActionButton>
+            <ActionButton className="primary-button compact" disabled={saving} type="submit">
               {saving && <Loader2 className="spin" size={16} />}
               {t(saving ? '创建中...' : '创建子账号')}
-            </button>
+            </ActionButton>
           </div>
         </form>
       </section>
@@ -7255,11 +7138,11 @@ function EditSubAccountDialog({
           </label>
           {error && <p className="account-dialog-error" role="alert">{error}</p>}
           <div className="account-dialog-actions">
-            <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</button>
-            <button className="primary-button compact" disabled={saving} type="submit">
+            <ActionButton className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</ActionButton>
+            <ActionButton className="primary-button compact" disabled={saving} type="submit">
               {saving && <Loader2 className="spin" size={16} />}
               {t(saving ? '保存中...' : '保存修改')}
-            </button>
+            </ActionButton>
           </div>
         </form>
       </section>
@@ -7317,11 +7200,11 @@ function DeleteSubAccountDialog({
           {error && <p className="account-dialog-error" role="alert">{error}</p>}
         </div>
         <footer className="channel-confirm-footer">
-          <button className="ghost-button" disabled={deleting} onClick={onClose} type="button">{t('取消')}</button>
-          <button className="channel-confirm-submit danger" disabled={deleting} onClick={remove} type="button">
+          <ActionButton className="ghost-button" disabled={deleting} onClick={onClose} type="button">{t('取消')}</ActionButton>
+          <ActionButton className="channel-confirm-submit danger" disabled={deleting} onClick={remove} type="button">
             {deleting && <Loader2 className="spin" size={15} />}
             {t(deleting ? '正在删除...' : '删除')}
-          </button>
+          </ActionButton>
         </footer>
       </section>
     </div>
@@ -7382,10 +7265,10 @@ function BatchSubAccountsDialog({ accounts, action, onClose, onSuccess }: {
       </div>
       {(running || finished) && <p>{t('处理进度')}：{results.length} / {accounts.length} · {t('成功')} {results.filter(item => item.ok).length}</p>}
       <div className="account-dialog-actions">
-        <button className="ghost-button" type="button" disabled={running} onClick={onClose}>{t(finished ? '关闭' : '取消')}</button>
-        {!finished && <button className="primary-button" type="button" disabled={running} onClick={() => void run()}>
+        <ActionButton className="ghost-button" type="button" disabled={running} onClick={onClose}>{t(finished ? '关闭' : '取消')}</ActionButton>
+        {!finished && <ActionButton className="primary-button" type="button" disabled={running} onClick={() => void run()}>
           {running && <Loader2 size={16} className="spin" />}{t(running ? '处理中...' : action === 'sync' ? '开始同步' : '确认删除')}
-        </button>}
+        </ActionButton>}
       </div>
     </DialogContent>
   </Dialog>;
@@ -7394,9 +7277,9 @@ function BatchSubAccountsDialog({ accounts, action, onClose, onSuccess }: {
 function SubAccountsView() {
   const { language, t } = useLanguage();
   const [items, setItems] = useState<SubAccount[]>([]);
+  const [financeAccount, setFinanceAccount] = useState<{ public_username: string; upstream_user_id: number; view: 'usage' | 'settlements' } | null>(null);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [settlementAccount, setSettlementAccount] = useState<SubAccount | null>(null);
   const [rateAccount, setRateAccount] = useState<SubAccount | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<SubAccount | null>(null);
@@ -7471,42 +7354,50 @@ function SubAccountsView() {
   }
 
   return (
-    <section>
+    <section className="sub-accounts-page">
       <PageHeading
         icon={Users}
         title={t('子账号管理')}
-        subtitle={t('管理子账号、结算及分类汇率。')}
+        subtitle={t('管理子账号及分类汇率。')}
         action={
           <div className="action-row">
-            {syncEnabled && <button className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
+            {syncEnabled && <ActionButton className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
               onClick={() => setBatch({ action: 'sync', accounts: selectedAccounts })}>
               <RefreshCcw size={17} />{t('批量同步')}（{selectedAccounts.length}）
-            </button>}
-            <button className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
+            </ActionButton>}
+            <ActionButton className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
               onClick={() => setBatch({ action: 'delete', accounts: selectedAccounts })}>
               <Trash2 size={17} />{t('批量删除')}（{selectedAccounts.length}）
-            </button>
-            <button className="ghost-button compact" onClick={() => load(true)} type="button">
+            </ActionButton>
+            <ActionButton className="ghost-button compact" onClick={() => load(true)} type="button">
               <RefreshCcw size={17} />
               {t('刷新')}
-            </button>
-            <button className="primary-button compact" onClick={() => setCreateOpen(true)} type="button">
+            </ActionButton>
+            <ActionButton className="primary-button compact" onClick={() => setCreateOpen(true)} type="button">
               <Plus size={17} />
               {t('新增子账号')}
-            </button>
+            </ActionButton>
           </div>
         }
       />
       <NoticeBanner notice={notice} />
-      <div className="panel">
+      <div className="panel sub-accounts-panel">
         {loading ? (
           <div className="loading-block">
             <Loader2 className="spin" />
             {t('正在检查权限')}
           </div>
         ) : items.length ? (
-          <div className="table-wrap">
-            <table className="sub-accounts-table">
+          <div className="table-wrap sub-accounts-scroll" role="region" aria-label={t('子账号管理')} tabIndex={0}>
+            <table className={`sub-accounts-table ${syncEnabled ? 'has-upstream-column' : ''}`}>
+              <colgroup>
+                <col style={{ width: 48 }} /><col style={{ width: 76 }} />
+                <col style={{ width: 180 }} />
+                {syncEnabled && <col style={{ width: 180 }} />}
+                <col style={{ width: 180 }} /><col style={{ width: 96 }} />
+                <col style={{ width: 160 }} /><col style={{ width: 96 }} />
+                <col style={{ width: syncEnabled ? 570 : 500 }} />
+              </colgroup>
               <thead>
                 <tr>
                   <th><input type="checkbox" aria-label={t('全选')} checked={items.length > 0 && selectedAccounts.length === items.length}
@@ -7516,9 +7407,9 @@ function SubAccountsView() {
                   <th>{t('本站用户名')}</th>
                   {syncEnabled && <th>{t('GYS用户名')}</th>}
                   <th>{t('显示名')}</th>
-                  <th>{t('渠道数')}</th>
-                  <th>{t('已用额度')}</th>
-                  <th>{t('状态')}</th>
+                  <th className="sub-account-count">{t('渠道数')}</th>
+                  <th className="sub-account-quota">{t('已用额度')}</th>
+                  <th className="sub-account-status">{t('状态')}</th>
                   <th>{t('操作')}</th>
                 </tr>
               </thead>
@@ -7528,36 +7419,39 @@ function SubAccountsView() {
                   const upstreamUsername = subAccountUpstreamUsername(item);
                   const accountName = item.display_name || publicUsername || upstreamUsername;
                   return (
-                  <tr key={item.id}>
+                  <tr key={item.id} data-selected={selectedIds.includes(item.id) || undefined}>
                     <td><input type="checkbox" aria-label={`${t('选择')} ${accountName}`} checked={selectedIds.includes(item.id)}
                       onChange={event => setSelectedIds(current => event.target.checked ? [...new Set([...current, item.id])] : current.filter(id => id !== item.id))} /></td>
-                    <td>{item.id}</td>
-                    <td>{publicUsername || <Badge>{t('未映射')}</Badge>}</td>
+                    <td><span className="sub-account-id">{item.id}</span></td>
+                    <td className="sub-account-name">{publicUsername || <Badge>{t('未映射')}</Badge>}</td>
                     {syncEnabled && <td>{upstreamUsername || '-'}</td>}
                     <td>{item.mapping_display_name || item.display_name || '-'}</td>
-                    <td>{item.channel_count || 0}</td>
-                    <td>{formatQuota(item.used_quota)}</td>
-                    <td>
+                    <td className="sub-account-count"><span>{formatInteger(item.channel_count)}</span></td>
+                    <td className="sub-account-quota">${formatNumericText(formatQuota(item.used_quota).slice(1))}</td>
+                    <td className="sub-account-status">
                       <Badge tone={item.status === 1 ? 'green' : 'red'}>{statusLabel(item.status, language)}</Badge>
                     </td>
                     <td>
                       <div className="sub-account-row-actions">
-                        {syncEnabled && <button disabled={syncingId !== null} onClick={() => void syncMapping(item)} type="button">
+                        {syncEnabled && <ActionButton disabled={syncingId !== null} onClick={() => void syncMapping(item)} type="button">
                           <RefreshCcw className={syncingId === item.id ? 'spin' : undefined} size={14} />
                           {t(syncingId === item.id ? '同步中...' : '同步')}
-                        </button>}
-                        <button aria-label={t('为 {{name}} 结算', { name: accountName })} onClick={() => setSettlementAccount(item)} type="button">
-                          <CheckCircle2 size={14} />{t('结算')}
-                        </button>
-                        <button aria-label={t('为 {{name}} 设置汇率', { name: accountName })} onClick={() => setRateAccount(item)} type="button">
+                        </ActionButton>}
+                        <ActionButton className="finance-action" disabled={!publicUsername} onClick={() => { if (publicUsername) setFinanceAccount({ public_username: publicUsername, upstream_user_id: item.id, view: 'usage' }); }} type="button">
+                          <BarChart3 size={14} />{t('查看分类消耗')}
+                        </ActionButton>
+                        <ActionButton className="finance-action" disabled={!publicUsername} onClick={() => { if (publicUsername) setFinanceAccount({ public_username: publicUsername, upstream_user_id: item.id, view: 'settlements' }); }} type="button">
+                          <Eye size={14} />{t('查看结算')}
+                        </ActionButton>
+                        <ActionButton aria-label={t('为 {{name}} 设置汇率', { name: accountName })} onClick={() => setRateAccount(item)} type="button">
                           <CircleDollarSign size={14} />{t('设置汇率')}
-                        </button>
-                        <button aria-label={t('编辑 {{name}}', { name: accountName })} onClick={() => setEditingAccount(item)} type="button">
+                        </ActionButton>
+                        <ActionButton aria-label={t('编辑 {{name}}', { name: accountName })} onClick={() => setEditingAccount(item)} type="button">
                           <Pencil size={14} />{t('编辑')}
-                        </button>
-                        <button aria-label={t('删除 {{name}}', { name: accountName })} className="danger" onClick={() => setDeletingAccount(item)} type="button">
+                        </ActionButton>
+                        <ActionButton aria-label={t('删除 {{name}}', { name: accountName })} className="danger" onClick={() => setDeletingAccount(item)} type="button">
                           <Trash2 size={14} />{t('删除')}
-                        </button>
+                        </ActionButton>
                       </div>
                     </td>
                   </tr>
@@ -7575,12 +7469,11 @@ function SubAccountsView() {
           setItems(current => updated ? current.map(item => item.id === id ? updated : item) : current.filter(item => item.id !== id));
           setSelectedIds(current => current.filter(value => value !== id));
         }} />}
-      {settlementAccount && (
-        <SubAccountSettlementDialog
-          key={settlementAccount.id}
-          account={settlementAccount}
-          onClose={() => setSettlementAccount(null)}
-        />
+      {financeAccount?.view === 'usage' && (
+        <UserMappingUsageDialog key={financeAccount.upstream_user_id} mapping={financeAccount} onClose={() => setFinanceAccount(null)} />
+      )}
+      {financeAccount?.view === 'settlements' && (
+        <UserMappingSettlementsDialog key={financeAccount.upstream_user_id} mapping={financeAccount} onClose={() => setFinanceAccount(null)} />
       )}
       {rateAccount && (
         <SubAccountRateDialog
@@ -7613,6 +7506,7 @@ function ViewRenderer({
   if (view === 'api-access') return <ApiAccessView />;
   if (view === 'sub-accounts') return <SubAccountsView />;
   if (view === 'daily-stats') return <DailyStatsView />;
+  if (view === 'settlement-history') return <SettlementHistoryView key={user.user_id} />;
   if (view === 'model-gaps') return <ModelGapsView />;
   if (view === 'announcements') return <AnnouncementManagementView />;
   if (view === 'user-mappings') return <UserMappingsView />;
@@ -7728,9 +7622,9 @@ function SupplierApplication() {
           <AlertTriangle size={30} />
           <span>{t('暂时无法验证登录状态，请重试')}</span>
           <p className="auth-error-details">{t(authError)}</p>
-          <button className="primary-button compact" type="button" onClick={() => setAuthAttempt((value) => value + 1)}>
+          <ActionButton className="primary-button compact" type="button" onClick={() => setAuthAttempt((value) => value + 1)}>
             <RefreshCcw size={16} />{t('重试')}
-          </button>
+          </ActionButton>
         </main>
       );
     }
@@ -7764,9 +7658,9 @@ function SupplierApplication() {
           <AlertTriangle size={18} />
           <span>{t('暂时无法验证登录状态，请重试')}</span>
           <span className="auth-error-details">{t(authError)}</span>
-          <button className="ghost-button compact" type="button" onClick={() => setAuthAttempt((value) => value + 1)}>
+          <ActionButton className="ghost-button compact" type="button" onClick={() => setAuthAttempt((value) => value + 1)}>
             <RefreshCcw size={15} />{t('重试')}
-          </button>
+          </ActionButton>
         </div>
       )}
       <ViewRenderer

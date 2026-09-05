@@ -7,6 +7,7 @@ import logging
 import os
 import re
 import secrets
+import socket
 import threading
 import time
 import uuid
@@ -381,6 +382,8 @@ class SessionStore:
                         id BIGSERIAL PRIMARY KEY,
                         title TEXT NOT NULL,
                         content TEXT NOT NULL,
+                        title_en TEXT NOT NULL DEFAULT '',
+                        content_en TEXT NOT NULL DEFAULT '',
                         is_published SMALLINT NOT NULL DEFAULT 1,
                         created_by_user_id BIGINT NOT NULL,
                         created_by_username CITEXT NOT NULL,
@@ -403,6 +406,17 @@ class SessionStore:
                         active SMALLINT NOT NULL DEFAULT 1,
                         created_at BIGINT NOT NULL,
                         updated_at BIGINT NOT NULL
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS settlement_transaction_ids (
+                        transaction_id TEXT PRIMARY KEY
+                    )
+                    """,
+                    """
+                    CREATE TABLE IF NOT EXISTS sub_account_sequences (
+                        parent_upstream_user_id BIGINT PRIMARY KEY,
+                        last_number BIGINT NOT NULL DEFAULT 0
                     )
                     """,
                     """
@@ -457,6 +471,14 @@ class SessionStore:
                     ADD COLUMN IF NOT EXISTS transaction_id TEXT
                     """,
                     """
+                    ALTER TABLE category_settlement_records
+                    ADD COLUMN IF NOT EXISTS payer_json TEXT
+                    """,
+                    """
+                    ALTER TABLE category_settlement_records
+                    ADD COLUMN IF NOT EXISTS payee_json TEXT
+                    """,
+                    """
                     CREATE INDEX IF NOT EXISTS idx_settlement_transaction
                     ON category_settlement_records(sub_account_user_id, transaction_id)
                     """,
@@ -479,6 +501,14 @@ class SessionStore:
                     """
                     ALTER TABLE upstream_sessions
                     ADD COLUMN IF NOT EXISTS cookie_updated_at BIGINT NOT NULL DEFAULT 0
+                    """,
+                    """
+                    ALTER TABLE announcements
+                    ADD COLUMN IF NOT EXISTS title_en TEXT NOT NULL DEFAULT ''
+                    """,
+                    """
+                    ALTER TABLE announcements
+                    ADD COLUMN IF NOT EXISTS content_en TEXT NOT NULL DEFAULT ''
                     """,
                     """
                     CREATE INDEX IF NOT EXISTS idx_upstream_sessions_local_account
@@ -1090,37 +1120,6 @@ class SessionStore:
             ).fetchone()
         return dict(row) if row is not None else None
 
-    def active_channel_summary_session_for_user_id(
-        self,
-        upstream_user_id: int,
-    ) -> DbRow | None:
-        if upstream_user_id <= 0:
-            return None
-        now = int(time.time() * 1000)
-        with self.lock:
-            row = self.connection.execute(
-                """
-                SELECT sessions.*
-                FROM upstream_sessions AS sessions
-                JOIN account_aliases AS aliases
-                  ON aliases.public_username = sessions.username
-                WHERE sessions.upstream_user_id = ?
-                  AND sessions.auth_source = 'upstream'
-                  AND sessions.authenticated = 1
-                  AND sessions.cookie_updated_at > 0
-                  AND sessions.expires_at > ?
-                  AND sessions.role = 'sub'
-                  AND aliases.active = 1
-                  AND aliases.account_kind = 'sub'
-                  AND aliases.upstream_user_id = sessions.upstream_user_id
-                ORDER BY sessions.cookie_updated_at DESC,
-                         sessions.created_at DESC,
-                         sessions.expires_at DESC
-                LIMIT 1
-                """,
-                (upstream_user_id, now),
-            ).fetchone()
-        return dict(row) if row is not None else None
 
     def active_channel_summary_session_for_mapping(
         self,
@@ -1637,6 +1636,35 @@ class SessionStore:
         if row is not None:
             raise BackendError(409, "用户名或 GYS 用户名已存在")
 
+    def allocate_sub_account_username(self, parent_id: int, parent_username: str,
+                                      children: list[dict[str, Any]]) -> str:
+        prefix = f"{parent_username}_sub_"
+        pattern = re.compile(re.escape(prefix) + r"([0-9]{1,18})", re.IGNORECASE)
+        with self.lock:
+            with self.connection.transaction():
+                rows = self.connection.execute(
+                    "SELECT upstream_username FROM account_aliases WHERE parent_upstream_user_id = ?",
+                    (parent_id,),
+                ).fetchall()
+                names = [str(row["upstream_username"]) for row in rows]
+                names.extend(str(child.get("username", "")) for child in children if isinstance(child, dict))
+                highest = max((int(match.group(1)) for name in names
+                               if (match := pattern.fullmatch(name))), default=0)
+                row = self.connection.execute(
+                    """
+                    INSERT INTO sub_account_sequences (parent_upstream_user_id, last_number)
+                    VALUES (?, ?)
+                    ON CONFLICT (parent_upstream_user_id) DO UPDATE
+                    SET last_number = GREATEST(sub_account_sequences.last_number + 1, excluded.last_number)
+                    RETURNING last_number
+                    """,
+                    (parent_id, highest + 1),
+                ).fetchone()
+                username = f"{prefix}{row['last_number']}"
+                if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", username):
+                    raise BackendError(400, "创建者的 GYS 用户名过长或格式不支持生成子账号")
+                return username
+
     def update_account_mapping(
         self,
         current_public_username: str,
@@ -2088,15 +2116,35 @@ class SessionStore:
                     values,
                 )
 
+    def allocate_settlement_transaction_id(self) -> str:
+        machine_code = os.environ.get("SETTLEMENT_MACHINE_CODE") or str(
+            int(hashlib.sha256(socket.gethostname().encode()).hexdigest()[:12], 16) % 1_000_000
+        ).zfill(6)
+        if not re.fullmatch(r"[0-9]{6}", machine_code):
+            raise BackendError(503, "结算机器码须配置为6位数字")
+        for _ in range(100):
+            transaction_id = f"PK{int(time.time() * 1000)}{machine_code}{secrets.randbelow(200) + 1:03d}"
+            row = self.connection.execute(
+                """
+                INSERT INTO settlement_transaction_ids (transaction_id) VALUES (?)
+                ON CONFLICT DO NOTHING RETURNING transaction_id
+                """, (transaction_id,),
+            ).fetchone()
+            if row is not None:
+                return str(row["transaction_id"])
+        raise BackendError(503, "交易编号生成繁忙，请重试")
+
     def record_settlement(
         self,
         sub_account_user_id: int,
         category: str,
         consumption_amount: Decimal,
+        *, payer: dict[str, Any],
     ) -> dict[str, Any]:
         records = self.record_settlements(
             sub_account_user_id,
             [(category, consumption_amount)],
+            payer=payer,
         )
         return records[0]
 
@@ -2104,9 +2152,9 @@ class SessionStore:
         self,
         sub_account_user_id: int,
         items: list[tuple[str, Decimal]],
+        *, payer: dict[str, Any],
     ) -> list[dict[str, Any]]:
         now = int(time.time() * 1000)
-        transaction_id = str(uuid.uuid4())
         requested_amounts = dict(items)
         ordered_categories = [
             category
@@ -2116,6 +2164,22 @@ class SessionStore:
         records: list[dict[str, Any]] = []
         with self.lock:
             with self.connection.transaction():
+                payee_row = self.connection.execute(
+                    "SELECT public_username, display_name FROM account_aliases WHERE upstream_user_id = ?",
+                    (sub_account_user_id,),
+                ).fetchone()
+                if payee_row is None:
+                    raise BackendError(404, "收款账号映射不存在")
+                payer_json = json.dumps({
+                    "id": payer["user_id"], "source": payer["auth_source"],
+                    "username": payer["username"], "displayName": payer["display_name"],
+                }, ensure_ascii=False)
+                payee_json = json.dumps({
+                    "id": sub_account_user_id, "source": "upstream",
+                    "username": str(payee_row["public_username"]),
+                    "displayName": str(payee_row["display_name"]),
+                }, ensure_ascii=False)
+                transaction_id = self.allocate_settlement_transaction_id()
                 self.connection.execute(
                     "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
                     (f"channel-summary:{sub_account_user_id}",),
@@ -2247,8 +2311,9 @@ class SessionStore:
                         """
                         INSERT INTO category_settlement_records
                             (sub_account_user_id, category, previous_amount, settled_amount,
-                             change_amount, rate_percent, settlement_amount, created_at, transaction_id)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                             change_amount, rate_percent, settlement_amount, created_at, transaction_id,
+                             payer_json, payee_json)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         RETURNING id
                         """,
                         (
@@ -2261,6 +2326,8 @@ class SessionStore:
                             decimal_text(settlement_amount),
                             now,
                             transaction_id,
+                            payer_json,
+                            payee_json,
                         ),
                     )
                     inserted = cursor.fetchone()
@@ -2270,6 +2337,8 @@ class SessionStore:
                         {
                             "id": int(inserted["id"]),
                             "transaction_id": transaction_id,
+                            "payer_json": payer_json,
+                            "payee_json": payee_json,
                             "category": category,
                             "previous_amount": decimal_text(previous),
                             "settled_amount": decimal_text(settled),
@@ -2293,7 +2362,7 @@ class SessionStore:
             rows = self.connection.execute(
                 """
                 SELECT id, category, previous_amount, settled_amount, change_amount,
-                       rate_percent, settlement_amount, created_at, transaction_id
+                       rate_percent, settlement_amount, created_at, transaction_id, payer_json, payee_json
                 FROM category_settlement_records
                 WHERE sub_account_user_id = ?
                 ORDER BY created_at DESC, id DESC
@@ -2303,7 +2372,7 @@ class SessionStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def settlement_transactions(self, user_id: int) -> list[dict[str, Any]]:
+    def settlement_transactions(self, user_id: int, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
         with self.lock:
             rows = self.connection.execute(
                 """
@@ -2314,7 +2383,7 @@ class SessionStore:
                     WHERE sub_account_user_id = ?
                     GROUP BY COALESCE(transaction_id, 'legacy-' || CAST(id AS text))
                     ORDER BY tx_time DESC, last_id DESC
-                    LIMIT 100
+                    LIMIT ? OFFSET ?
                 )
                 SELECT records.*,
                        COALESCE(records.transaction_id, 'legacy-' || CAST(records.id AS text)) AS tx_id
@@ -2323,7 +2392,7 @@ class SessionStore:
                 WHERE records.sub_account_user_id = ?
                 ORDER BY recent.tx_time DESC, recent.last_id DESC, records.id ASC
                 """,
-                (user_id, user_id),
+                (user_id, max(1, min(limit, 101)), max(0, offset), user_id),
             ).fetchall()
         grouped: dict[str, dict[str, Any]] = {}
         for row in rows:
@@ -2332,6 +2401,8 @@ class SessionStore:
                 grouped[tx_id] = {
                     "id": tx_id, "createdAt": int(row["created_at"]),
                     "legacy": row["transaction_id"] is None,
+                    "payer": json.loads(row["payer_json"]) if row["payer_json"] else None,
+                    "payee": json.loads(row["payee_json"]) if row["payee_json"] else None,
                     "items": [], "consumption": Decimal(0), "settlement": Decimal(0),
                 }
             transaction = grouped[tx_id]
@@ -2343,9 +2414,59 @@ class SessionStore:
         return [{
             "id": tx["id"], "createdAt": tx["createdAt"], "legacy": tx["legacy"],
             "items": tx["items"],
+            "payer": tx["payer"], "payee": tx["payee"],
             "totalConsumptionAmount": decimal_text(tx["consumption"]),
             "totalSettlementAmount": decimal_text(tx["settlement"]),
         } for tx in grouped.values()]
+
+    def delete_settlement_transaction(self, user_id: int, transaction_id: str) -> None:
+        with self.lock:
+            with self.connection.transaction():
+                # Use the same lock as settlement creation, so rollback and new
+                # settlements cannot race or restore the same amount twice.
+                self.connection.execute(
+                    "SELECT pg_advisory_xact_lock(hashtextextended(?, 0))",
+                    (f"channel-summary:{user_id}",),
+                )
+                records = self.connection.execute(
+                    """
+                    SELECT id, category, change_amount FROM category_settlement_records
+                    WHERE sub_account_user_id = ?
+                      AND COALESCE(transaction_id, 'legacy-' || CAST(id AS text)) = ?
+                    FOR UPDATE
+                    """, (user_id, transaction_id),
+                ).fetchall()
+                if not records:
+                    raise BackendError(404, "结算记录不存在或已删除")
+                amounts: dict[str, Decimal] = {}
+                for record in records:
+                    amount = Decimal(str(record["change_amount"]))
+                    if not amount.is_finite() or amount <= 0:
+                        raise BackendError(409, "该历史记录无法自动恢复，请核对结算额度")
+                    category = str(record["category"])
+                    amounts[category] = amounts.get(category, Decimal(0)) + amount
+                for category, amount in sorted(amounts.items()):
+                    rate = self.connection.execute(
+                        """
+                        SELECT settled_amount FROM category_exchange_rates
+                        WHERE sub_account_user_id = ? AND category = ? FOR UPDATE
+                        """, (user_id, category),
+                    ).fetchone()
+                    current = Decimal(str(rate["settled_amount"])) if rate else Decimal(0)
+                    if not current.is_finite() or current < amount:
+                        raise BackendError(409, "当前已结算额度与记录不一致，无法自动恢复")
+                    self.connection.execute(
+                        """
+                        UPDATE category_exchange_rates SET settled_amount = ?, updated_at = ?
+                        WHERE sub_account_user_id = ? AND category = ?
+                        """, (decimal_text(current - amount), int(time.time() * 1000), user_id, category),
+                    )
+                self.connection.execute(
+                    """
+                    DELETE FROM category_settlement_records WHERE sub_account_user_id = ?
+                      AND COALESCE(transaction_id, 'legacy-' || CAST(id AS text)) = ?
+                    """, (user_id, transaction_id),
+                )
 
     def delete_category_rates(self, sub_account_user_id: int) -> None:
         with self.lock:
@@ -2371,7 +2492,7 @@ class SessionStore:
         with self.lock:
             rows = self.connection.execute(
                 f"""
-                SELECT id, title, content, is_published,
+                SELECT id, title, content, title_en, content_en, is_published,
                        created_at, updated_at, published_at
                 FROM announcements
                 {where}
@@ -2386,6 +2507,8 @@ class SessionStore:
         self,
         title: str,
         content: str,
+        title_en: str,
+        content_en: str,
         created_by_user_id: int,
         created_by_username: str,
     ) -> DbRow:
@@ -2394,15 +2517,17 @@ class SessionStore:
             row = self.connection.execute(
                 """
                 INSERT INTO announcements
-                    (title, content, is_published, created_by_user_id,
+                    (title, content, title_en, content_en, is_published, created_by_user_id,
                      created_by_username, created_at, updated_at, published_at)
-                VALUES (?, ?, 1, ?, ?, ?, ?, ?)
-                RETURNING id, title, content, is_published,
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?)
+                RETURNING id, title, content, title_en, content_en, is_published,
                           created_at, updated_at, published_at
                 """,
                 (
                     title,
                     content,
+                    title_en,
+                    content_en,
                     created_by_user_id,
                     created_by_username,
                     now,
@@ -2424,7 +2549,7 @@ class SessionStore:
                 SET is_published = ?, updated_at = ?,
                     published_at = CASE WHEN ? = 1 THEN ? ELSE NULL END
                 WHERE id = ?
-                RETURNING id, title, content, is_published,
+                RETURNING id, title, content, title_en, content_en, is_published,
                           created_at, updated_at, published_at
                 """,
                 (published_value, now, published_value, now, announcement_id),
@@ -2887,10 +3012,16 @@ def parse_account_mapping_body(
 
 def announcement_payload(row: DbRow) -> dict[str, Any]:
     published_at = row.get("published_at")
+    title = str(row["title"])
+    content = str(row["content"])
     return {
         "id": int(row["id"]),
-        "title": str(row["title"]),
-        "content": str(row["content"]),
+        "title": title,
+        "content": content,
+        "titleZh": title,
+        "contentZh": content,
+        "titleEn": str(row.get("title_en") or ""),
+        "contentEn": str(row.get("content_en") or ""),
         "published": bool(int(row["is_published"])),
         "createdAt": int(row["created_at"]),
         "updatedAt": int(row["updated_at"]),
@@ -2959,6 +3090,37 @@ def settlement_record_payload(record: DbRow) -> dict[str, Any]:
         "settlementAmount": dollar_amount(Decimal(str(record["settlement_amount"]))),
         "createdAt": int(record["created_at"]),
     }
+
+
+async def authorize_account_finance(session: DbRow, target_id: int) -> None:
+    if is_super_admin(session):
+        return
+    if session.get("auth_source") != "upstream" or session.get("role") not in {"supplier", "admin"}:
+        raise BackendError(403, "当前账号无权管理子账号财务")
+    parent_id = int(session["upstream_user_id"])
+    if target_id == parent_id or target_id not in store.managed_mapping_ids(parent_id):
+        raise BackendError(404, "子账号不存在或不属于当前账号")
+    await ensure_managed_sub_account(session, target_id)
+
+
+async def authorize_mapping_finance(session: DbRow, public_username: str) -> int:
+    if not is_super_admin(session):
+        if session.get("auth_source") != "upstream" or session.get("role") not in {"supplier", "admin"}:
+            raise BackendError(403, "当前账号无权管理子账号财务")
+        with store.lock:
+            mapping = store.connection.execute(
+                """
+                SELECT upstream_user_id FROM account_aliases
+                WHERE public_username = ? AND account_kind = 'sub'
+                  AND parent_upstream_user_id = ?
+                """,
+                (public_username, int(session["upstream_user_id"])),
+            ).fetchone()
+        if mapping is None:
+            raise BackendError(404, "子账号不存在或不属于当前账号")
+    target_id = store.mapping_account_id(public_username)
+    await authorize_account_finance(session, target_id)
+    return target_id
 
 
 async def ensure_managed_sub_account(session: DbRow, target_id: int) -> dict[str, Any]:
@@ -3498,6 +3660,25 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             )
             return success_response(request, request_id, sanitize_data(data), cookie)
 
+        if path == "/api/announcements" and request.method == "GET":
+            if not store.within_limit(f"public-announcements:{remote_key}", 120, 60_000):
+                raise BackendError(429, "公告请求过于频繁，请稍后重试")
+            rows = store.announcements(published_only=True)
+            announcement_cookie = (
+                (token, store.touch(session))
+                if session is not None and session["authenticated"]
+                else None
+            )
+            return success_response(
+                request,
+                request_id,
+                {
+                    "items": [announcement_payload(row) for row in rows],
+                    "total": len(rows),
+                },
+                announcement_cookie,
+            )
+
         if path == "/api/auth/login" and request.method == "POST":
             body = await read_body(request)
             username = body.get("username", "")
@@ -3557,6 +3738,23 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             raise BackendError(401, "请重新登录账号")
         cookie = (token, store.touch(session))
 
+        if path == "/api/settlement-history" and request.method == "GET":
+            if session.get("auth_source") == LOCAL_AUTH_SOURCE:
+                raise BackendError(403, "当前账号无权查看此结算历史")
+            user_id = session.get("upstream_user_id")
+            if not user_id:
+                raise BackendError(401, "用户身份无效，请重新登录")
+            if any(key != "page" for key in request.query_params):
+                raise BackendError(400, "不允许指定数据账号或未知参数")
+            raw_page = request.query_params.get("page", "1")
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", raw_page):
+                raise BackendError(400, "页码无效")
+            page = int(raw_page)
+            transactions = store.settlement_transactions(int(user_id), limit=21, offset=(page - 1) * 20)
+            return success_response(request, request_id, {
+                "items": transactions[:20], "page": page, "hasMore": len(transactions) > 20,
+            }, cookie)
+
         if path == "/api/auth/profile" and request.method == "GET":
             if session.get("auth_source") == LOCAL_AUTH_SOURCE:
                 return success_response(request, request_id, public_profile(session), cookie)
@@ -3602,18 +3800,6 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 cookie,
             )
 
-        if path == "/api/announcements" and request.method == "GET":
-            rows = store.announcements(published_only=True)
-            return success_response(
-                request,
-                request_id,
-                {
-                    "items": [announcement_payload(row) for row in rows],
-                    "total": len(rows),
-                },
-                cookie,
-            )
-
         if path == "/api/announcement-management" and request.method in {"GET", "POST"}:
             assert_announcement_admin(session)
             if request.method == "GET":
@@ -3636,17 +3822,27 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             ):
                 raise BackendError(429, "公告发布过于频繁，请稍后重试")
             body = await read_body(request)
-            title = body.get("title")
-            content = body.get("content")
+            title = body.get("titleZh", body.get("title"))
+            content = body.get("contentZh", body.get("content"))
+            title_en = body.get("titleEn")
+            content_en = body.get("contentEn")
             title = title.strip() if isinstance(title, str) else ""
             content = content.strip() if isinstance(content, str) else ""
+            title_en = title_en.strip() if isinstance(title_en, str) else ""
+            content_en = content_en.strip() if isinstance(content_en, str) else ""
             if not title or len(title) > 120:
-                raise BackendError(400, "公告标题须为 1 至 120 个字符")
+                raise BackendError(400, "中文公告标题须为 1 至 120 个字符")
             if not content or len(content) > 5_000:
-                raise BackendError(400, "公告内容须为 1 至 5000 个字符")
+                raise BackendError(400, "中文公告内容须为 1 至 5000 个字符")
+            if not title_en or len(title_en) > 120:
+                raise BackendError(400, "英文公告标题须为 1 至 120 个字符")
+            if not content_en or len(content_en) > 5_000:
+                raise BackendError(400, "英文公告内容须为 1 至 5000 个字符")
             row = store.create_announcement(
                 title,
                 content,
+                title_en,
+                content_en,
                 int(actor["user_id"]),
                 str(actor["username"]),
             )
@@ -3771,8 +3967,8 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             path,
         )
         if mapping_usage_match and request.method in {"GET", "POST"}:
-            assert_super_admin(session)
             public_username = mapping_usage_match.group(1)
+            await authorize_mapping_finance(session, public_username)
             if request.method == "POST":
                 current_snapshot = store.channel_summary_for_mapping(public_username)
                 if current_snapshot["userId"] is None:
@@ -3831,18 +4027,17 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
         )
         if (rates_match or mapping_rates_match) and request.method in {"GET", "PUT"}:
             if mapping_rates_match:
-                assert_super_admin(session)
-                target_id = store.mapping_account_id(mapping_rates_match.group(1))
+                target_id = await authorize_mapping_finance(session, mapping_rates_match.group(1))
             else:
                 if session.get("auth_source") != "upstream" or session["role"] not in {"supplier", "admin"}:
                     raise BackendError(403, "当前账号无权设置子账号汇率")
                 target_id = int(rates_match.group(1))
                 if target_id <= 0:
                     raise BackendError(400, "子账号 ID 无效")
-                await ensure_managed_sub_account(session, target_id)
+                await authorize_account_finance(session, target_id)
             if request.method == "GET":
                 payload = category_rates_payload(target_id)
-                if request.query_params.get("include_settlement") == "1":
+                if mapping_rates_match and request.query_params.get("include_settlement") == "1":
                     payload["settlementSummary"] = sub_account_settlement_summary(target_id)
                 return success_response(
                     request,
@@ -3875,21 +4070,32 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 cookie,
             )
 
-        settlement_match = re.fullmatch(r"/api/sub-accounts/(\d+)/settlements", path)
+        delete_settlement_match = re.fullmatch(
+            r"/api/user-mappings/([A-Za-z0-9_.-]{3,64})/settlements/([A-Za-z0-9-]{1,80})", path
+        )
+        if delete_settlement_match and request.method == "DELETE":
+            target_id = await authorize_mapping_finance(session, delete_settlement_match.group(1))
+            store.delete_settlement_transaction(target_id, delete_settlement_match.group(2))
+            return success_response(request, request_id, {"message": "结算已删除，额度已恢复"}, cookie)
+
         mapping_settlement_match = re.fullmatch(
             r"/api/user-mappings/([A-Za-z0-9_.-]{3,64})/settlements", path
         )
-        if (settlement_match or mapping_settlement_match) and request.method == "POST":
-            if mapping_settlement_match:
-                assert_super_admin(session)
-                target_id = store.mapping_account_id(mapping_settlement_match.group(1))
-            else:
-                if session.get("auth_source") != "upstream" or session["role"] not in {"supplier", "admin"}:
-                    raise BackendError(403, "当前账号无权结算子账号消耗")
-                target_id = int(settlement_match.group(1))
-                if target_id <= 0:
-                    raise BackendError(400, "子账号 ID 无效")
-                await ensure_managed_sub_account(session, target_id)
+        if mapping_settlement_match and request.method == "GET":
+            target_id = await authorize_mapping_finance(session, mapping_settlement_match.group(1))
+            if any(key != "page" for key in request.query_params):
+                raise BackendError(400, "不支持的查询参数")
+            raw_page = request.query_params.get("page", "1")
+            if not re.fullmatch(r"[1-9][0-9]{0,5}", raw_page):
+                raise BackendError(400, "页码无效")
+            page = int(raw_page)
+            transactions = store.settlement_transactions(target_id, limit=11, offset=(page - 1) * 10)
+            return success_response(request, request_id, {
+                "items": transactions[:10], "page": page, "pageSize": 10,
+                "hasMore": len(transactions) > 10,
+            }, cookie)
+        if mapping_settlement_match and request.method == "POST":
+            target_id = await authorize_mapping_finance(session, mapping_settlement_match.group(1))
             body = await read_body(request)
             if "items" in body:
                 raw_items = body.get("items")
@@ -3934,7 +4140,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                         raise BackendError(400, f"{category} 本次结算消耗额度必须为整数")
                     parsed_items.append((category, consumption_amount))
 
-                records = store.record_settlements(target_id, parsed_items)
+                records = store.record_settlements(target_id, parsed_items, payer=public_profile(session))
                 total_settlement_amount = sum(
                     (Decimal(str(record["settlement_amount"])) for record in records),
                     Decimal(0),
@@ -3981,6 +4187,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 target_id,
                 category,
                 consumption_amount,
+                payer=public_profile(session),
             )
             total_usage_amount = Decimal(str(record["total_usage_amount"]))
             settled_amount = Decimal(str(record["settled_amount"]))
@@ -4042,18 +4249,18 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
             if session["role"] not in {"supplier", "admin"}:
                 raise BackendError(403, "当前账号无权管理子账号")
             body = await read_body(request)
-            upstream_username = body.get("gys_username")
+            public_username = body.get("public_username")
             display_name = body.get("display_name")
             password = body.get("password")
-            upstream_username = (
-                upstream_username.strip() if isinstance(upstream_username, str) else ""
+            public_username = (
+                public_username.strip() if isinstance(public_username, str) else ""
             )
             display_name = display_name.strip() if isinstance(display_name, str) else ""
             password = password if isinstance(password, str) else ""
-            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", upstream_username):
-                raise BackendError(400, "GYS用户名须为3至64位字母、数字、点、横线或下划线")
+            if not re.fullmatch(r"[A-Za-z0-9_.-]{3,64}", public_username):
+                raise BackendError(400, "本站用户名须为3至64位字母、数字、点、横线或下划线")
             if not display_name or len(display_name) > 128:
-                raise BackendError(400, "请输入有效的显示名")
+                raise BackendError(400, "请输入有效的本站显示名")
             if (
                 len(password) < 8
                 or len(password) > 4096
@@ -4062,6 +4269,17 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 or not re.search(r"[^A-Za-z0-9]", password)
             ):
                 raise BackendError(400, "密码至少8位，须含字母、数字和特殊字符")
+            store.assert_sub_account_username_available(public_username)
+            parent_username = store.resolve_login_username(str(session["username"]))
+            children = await authorized_json(session, "/api/sub-accounts")
+            child_items = children if isinstance(children, list) else (
+                children.get("items") if isinstance(children, dict) else None
+            )
+            if not isinstance(child_items, list):
+                raise BackendError(502, "无法读取 GYS 子账号列表，未创建子账号")
+            upstream_username = store.allocate_sub_account_username(
+                int(session["upstream_user_id"]), parent_username, child_items,
+            )
             store.assert_sub_account_username_available(upstream_username)
             data = await authorized_json(
                 session,
@@ -4069,7 +4287,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 method="POST",
                 body={
                     "username": upstream_username,
-                    "display_name": display_name,
+                    "display_name": upstream_username,
                     "password": password,
                 },
             )
@@ -4095,7 +4313,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 raise BackendError(502, "子账号已在 GYS 创建，但未获取到有效 ID，登录映射未创建")
             try:
                 store.create_account_mapping(
-                    upstream_username, upstream_username, display_name,
+                    public_username, upstream_username, display_name,
                     "sub", int(raw_created_id),
                     parent_user_id=int(session["upstream_user_id"]),
                 )
@@ -4148,42 +4366,6 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 update_body["password"] = password
             data = await authorized_json(session, path, method="PUT", body=update_body)
             return success_response(request, request_id, sanitize_data(data), cookie)
-
-        settlement_usage_sync_match = re.fullmatch(
-            r"/api/sub-accounts/(\d+)/settlement-usage/sync",
-            path,
-        )
-        if settlement_usage_sync_match and request.method == "POST":
-            if session["role"] not in {"supplier", "admin"}:
-                raise BackendError(403, "当前账号无权同步子账号消耗")
-            target_id = int(settlement_usage_sync_match.group(1))
-            if target_id <= 0:
-                raise BackendError(400, "子账号 ID 无效")
-            await ensure_managed_sub_account(session, target_id)
-            if not store.within_limit(
-                f"settlement-usage-sync:{target_id}",
-                6,
-                60_000,
-            ):
-                raise BackendError(429, "同步操作过于频繁，请稍后重试")
-            target_session = store.active_channel_summary_session_for_user_id(target_id)
-            if target_session is None:
-                raise BackendError(409, "该子账号暂无可用登录 Cookie，请先使用该账号登录系统")
-            try:
-                await refresh_channel_summary(target_session)
-            except BackendError as error:
-                if error.status in {401, 403}:
-                    raise BackendError(
-                        409,
-                        "该子账号登录 Cookie 已失效，请重新登录该账号",
-                    ) from error
-                raise
-            return success_response(
-                request,
-                request_id,
-                sub_account_settlement_summary(target_id),
-                cookie,
-            )
 
         allowed_patterns = READ_PATHS if request.method == "GET" else WRITE_PATHS.get(request.method, ())
         if not any(pattern.fullmatch(path) for pattern in allowed_patterns):
