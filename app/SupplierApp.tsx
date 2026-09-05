@@ -40,6 +40,7 @@ import {
 } from 'lucide-react';
 import type { ComponentType, CSSProperties, FormEvent, ReactNode } from 'react';
 import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { enUS, zhCN } from 'date-fns/locale';
 import type { DateRange } from 'react-day-picker';
 import { Calendar } from '@/components/ui/calendar';
@@ -265,36 +266,15 @@ function subAccountPublicUsername(account: SubAccount) {
   return account.original_username ? account.username : null;
 }
 
-type SubAccountUsageSummary = {
-  totalAmount: string;
-  totalPayableAmount?: string;
-  listedAmount: string | null;
-  amountsDiffer: boolean;
-  channelCount: number;
-  tagCount: number;
-  platformCount: number;
-  modelCount: number;
-  requestCount: number;
-  queryPrefix: string;
+type SubAccountSettlementSummary = {
+  available: boolean;
+  refreshedAt: number | null;
   categories: Array<{
     category: string;
-    channelCount: number;
-    tagCount: number;
-    modelCount: number;
-    requestCount: number;
-    ratePercent?: string;
+    ratePercent: string;
     amount: string;
-    settledAmount?: string;
-    payableAmount?: string;
-  }>;
-  rows: Array<{
-    category: string;
-    model: string;
-    channelCount: number;
-    tagCount: number;
-    requestCount: number;
-    amount: string;
-    sharePercent: string;
+    settledAmount: string;
+    payableAmount: string;
   }>;
 };
 
@@ -310,6 +290,15 @@ type SettlementRecord = {
   createdAt: number;
 };
 
+type SettlementTransaction = {
+  id: string;
+  createdAt: number;
+  legacy: boolean;
+  items: SettlementRecord[];
+  totalConsumptionAmount: string;
+  totalSettlementAmount: string;
+};
+
 type CategoryRateResponse = {
   userId: number;
   rates: Array<{
@@ -318,18 +307,17 @@ type CategoryRateResponse = {
     settledAmount: string;
   }>;
   settlementRecords: SettlementRecord[];
+  settlementTransactions: SettlementTransaction[];
 };
 
-type SettlementResponse = {
-  settlement: SettlementRecord;
-  category: {
-    category: string;
-    totalAmount: string;
-    settledAmount: string;
-    outstandingAmount: string;
-    ratePercent: string;
-    payableAmount: string;
-  };
+type SubAccountSettlementDataResponse = CategoryRateResponse & {
+  settlementSummary: SubAccountSettlementSummary;
+};
+
+type BatchSettlementResponse = {
+  settlements: SettlementRecord[];
+  settlementSummary: SubAccountSettlementSummary;
+  totalSettlementAmount: string;
 };
 
 type Notice = {
@@ -359,15 +347,39 @@ type UserMapping = {
   account_kind: 'primary' | 'sub' | string;
   upstream_user_id: number | null;
   active: boolean;
+  can_sync: boolean;
+  sync_enabled: boolean;
+  data_synced_at: number | null;
+  parent_upstream_user_id?: number | null;
+  parent_gys_username?: string | null;
   created_at: number;
   updated_at: number;
 };
 
-type AccountKind = 'primary' | 'sub';
 
 type UserMappingListResponse = {
   items: UserMapping[];
   total: number;
+};
+
+type UserChannelUsageSnapshot = {
+  available: boolean;
+  userId: number | null;
+  publicUsername: string;
+  channelCount: number;
+  totalQuota: string;
+  totalAmount: string;
+  refreshedAt: number | null;
+  categories: Array<{
+    category: string;
+    ratePercent: string;
+    quota: string;
+    amount: string;
+    settledAmount: string;
+    outstandingAmount: string;
+    channelCount: number;
+    aliveChannelCount: number;
+  }>;
 };
 
 type Language = 'zh' | 'en';
@@ -378,6 +390,27 @@ const SUPER_ADMIN_USERNAME = 'sanyeAdmin';
 const ALL_CHANNEL_FILTER_VALUE = '__gys_all__';
 
 const englishTranslations: Record<string, string> = {
+  '最多 ${{amount}}': 'Max ${{amount}}',
+  '{{category}}：消耗额度不能超过剩余额度 ${{amount}}': '{{category}}: consumption cannot exceed the remaining ${{amount}}',
+  '该账号存在结算历史，禁止删除': 'This account has settlement history and cannot be deleted',
+  '查看结算': 'View Settlements',
+  '查看 {{name}} 的结算记录': 'View settlements for {{name}}',
+  '显示最近100笔交易': 'Showing the latest 100 transactions',
+  '交易编号': 'Transaction ID',
+  '历史记录': 'Legacy record',
+  '本次交易结算总金额': 'Transaction settlement total',
+  '旧记录未保存交易编号，按原记录单独展示。': 'Older records have no transaction ID and are shown individually.',
+  '同步': 'Sync',
+  '同步失败': 'Sync failed',
+  '知道了': 'OK',
+  '全选': 'Select all',
+  '选择': 'Select',
+  '确认结算': 'Confirm Settlement',
+  '结算成功': 'Settlement saved',
+  '总消费（$）': 'Total consumption ($)',
+  '已结算（$）': 'Settled ($)',
+  '应结算（$）': 'Amount due ($)',
+  '应支付（USDT）': 'Payable (USDT)',
   '上 Key 系统': 'Key Upload System',
   '控制台': 'Dashboard',
   '渠道运行状态、消费额度与健康度概览。': 'Channel status, usage, and health overview.',
@@ -400,30 +433,37 @@ const englishTranslations: Record<string, string> = {
   '确定': 'Confirm',
   '清除': 'Clear',
   '关闭': 'Close',
+  '查看全部': 'View all',
   '刷新': 'Refresh',
   '提交': 'Submit',
   '操作': 'Actions',
-  '查看消耗': 'View Usage',
-  '查看 {{name}} 的消耗': 'View usage for {{name}}',
   '结算': 'Settle',
   '为 {{name}} 结算': 'Settle usage for {{name}}',
   '渠道分类结算': 'Channel Category Settlement',
   '正在加载结算数据': 'Loading settlement data',
   '加载结算数据失败': 'Failed to load settlement data',
   '提交结算失败': 'Failed to submit settlement',
-  '确认结算': 'Confirm Settlement',
+  '批量结算（{{count}}）': 'Settle Selected ({{count}})',
   '结算中...': 'Settling...',
-  '结算成功，本次结算金额 ${{amount}}': 'Settlement saved. Amount: ${{amount}}',
+  '批量结算成功，共 {{count}} 个分类，结算金额 ${{amount}}': 'Batch settlement saved for {{count}} categories. Amount: ${{amount}}',
+  '请选择结算分类': 'Select categories to settle',
+  '已选择 {{count}} 个分类': '{{count}} categories selected',
+  '请选择至少一个可结算分类': 'Select at least one category with available usage',
+  '选择全部可结算': 'Select all available',
+  '清空选择': 'Clear selection',
+  '本次结算明细': 'Settlement Details',
+  '已选分类': 'Selected Categories',
+  '暂无可结算分类': 'No categories are available to settle',
+  '可结算 ${{amount}} · 汇率 {{rate}}%': 'Available ${{amount}} · Rate {{rate}}%',
   '本次消耗额度': 'Usage to Settle',
   '可结算消耗': 'Available Usage',
-  '当前汇率': 'Current Rate',
   '本次结算金额': 'Settlement Amount',
   '结算金额': 'Settlement Amount',
   '结算汇率': 'Settlement Rate',
   '结算后累计': 'Cumulative Settled',
   '请输入有效的结算消耗额度': 'Enter a valid usage amount to settle',
   '结算消耗额度不能超过可结算额度': 'Usage to settle cannot exceed the available amount',
-  '本次结算金额 = 消耗额度 × 结算汇率。': 'Settlement amount = usage amount × settlement rate.',
+  '本次结算金额 = 各分类消耗额度 × 对应结算汇率之和。': 'Settlement amount is the sum of each category usage multiplied by its rate.',
   '设置汇率': 'Set Rates',
   '汇率': 'Rate',
   '为 {{name}} 设置汇率': 'Set rates for {{name}}',
@@ -438,26 +478,15 @@ const englishTranslations: Record<string, string> = {
   '保存汇率': 'Save Rates',
   '汇率须在 0% 至 100000% 之间': 'Rates must be between 0% and 100000%',
   '已结算金额须为大于或等于 0 的数字': 'Settled amounts must be numbers greater than or equal to 0',
-  '100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。': '100% keeps the original usage amount. Category and model amounts in View Usage are multiplied by this rate.',
-  '应付 =（总消耗 - 已结算）× 汇率。': 'Payable = (total usage - settled) × rate.',
-  '平台模型消耗': 'Platform & Model Usage',
-  '消耗总量': 'Total Usage',
-  '涉及平台': 'Platforms',
-  '模型统计': 'Model Groups',
-  '匹配标签': 'Matching Tags',
-  '渠道记录': 'Channel Records',
-  '请求记录': 'Requests',
+  '100% 为原始消耗金额；结算金额会按此比例计算。': '100% keeps the original usage amount. Settlement amounts use this rate.',
   '全部分类': 'All Categories',
   '选择分类': 'Select Category',
   '选择状态': 'Select Status',
   '选择标签': 'Select Tag',
   '请选择一个筛选项': 'Choose a filter option',
-  '渠道分类模型消耗': 'Model Usage by Channel Category',
-  '渠道分类总消耗': 'Total Usage by Channel Category',
   '总消耗': 'Total Usage',
+  '{{category}} · 总消耗：${{amount}}': '{{category}} · Total usage: ${{amount}}',
   '已结算': 'Settled',
-  '应付': 'Payable',
-  '总应付': 'Total Payable',
   '已结算金额': 'Settled Amount',
   '结算记录': 'Settlement History',
   '暂无结算记录': 'No settlement history',
@@ -468,18 +497,8 @@ const englishTranslations: Record<string, string> = {
   '保存时汇率': 'Rate at Save',
   '消耗额度': 'Usage Amount',
   '渠道分类': 'Channel Category',
-  '涉及分类': 'Categories',
-  '未归属模型': 'Unattributed Model',
-  '该分类暂无模型消耗': 'No model usage in this category',
-  '查询标签前缀：{{prefix}}*': 'Tag prefix: {{prefix}}*',
   '平台': 'Platform',
   '全部模型': 'All Models',
-  '加载子账号消耗失败': 'Failed to load sub-account usage',
-  '正在按分类读取全部模型消耗': 'Loading model usage by category',
-  '正在读取渠道分类总消耗': 'Loading total usage by channel category',
-  '该用户暂无匹配标签的渠道消耗': 'No channel usage matches this user’s tags',
-  '子账号列表额度为 {{amount}}，与标签查询合计不同。': 'The sub-account list shows {{amount}}, which differs from the tag-based total.',
-  '统计口径：标签前缀 {{prefix}}* 仅用于定位用户渠道；分类以原站渠道记录为准，再按实际模型汇总消费日志。': 'Source: the {{prefix}}* tag prefix only locates user channels; categories come from the original channel records, with usage logs grouped by actual model.',
   '状态': 'Status',
   '分类': 'Category',
   '备注': 'Note',
@@ -605,6 +624,8 @@ const englishTranslations: Record<string, string> = {
   '删除渠道失败': 'Failed to delete the channel',
   '同步中...': 'Syncing...',
   '同步用量': 'Sync Usage',
+  '同步用量成功': 'Usage synced successfully',
+  '暂无已同步的消耗数据，请点击“同步用量”。': 'No synced usage data is available. Select Sync Usage to update it.',
   '建议禁用词': 'Suggest Keywords',
   '分组视图': 'Group View',
   '列表视图': 'List View',
@@ -761,7 +782,7 @@ const englishTranslations: Record<string, string> = {
   '暂无缺口': 'No Gaps',
   '目前没有模型缺口提醒。': 'There are currently no model gap alerts.',
   '用户映射': 'User Mappings',
-  '管理本站用户名与 GYS 用户名的映射关系。': 'Manage mappings between site usernames and GYS usernames.',
+  '管理用户名与 GYS 用户名的映射关系。': 'Manage mappings between usernames and GYS usernames.',
   '新增映射': 'Add Mapping',
   '新增用户映射': 'Add User Mapping',
   '编辑用户映射': 'Edit User Mapping',
@@ -769,29 +790,59 @@ const englishTranslations: Record<string, string> = {
   '加载用户映射失败': 'Failed to load user mappings',
   '用户映射创建成功': 'User mapping created successfully',
   '用户映射更新成功': 'User mapping updated successfully',
+  '用户映射删除成功': 'User mapping deleted successfully',
+  '删除用户映射失败': 'Failed to delete the user mapping',
+  '确认删除用户映射': 'Delete User Mapping',
+  '确定删除用户映射“{{name}}”吗？': 'Delete user mapping “{{name}}”?',
+  '删除后，该用户将退出本站且无法登录，直到重新创建映射。GYS 上游账号将保留。': 'This user will be signed out and cannot sign in until a mapping is recreated. The GYS account will be retained.',
   '创建用户映射失败': 'Failed to create the user mapping',
   '更新用户映射失败': 'Failed to update the user mapping',
+  '查看分类消耗': 'View Category Usage',
+  '查看 {{name}} 的分类消耗': 'View category usage for {{name}}',
+  '用户分类消耗': 'User Category Usage',
+  '渠道分类消耗明细': 'Channel Category Usage Details',
+  '分类明细': 'Category Details',
+  '共 {{count}} 个分类': '{{count}} categories total',
+  '正在读取用户分类消耗': 'Loading user category usage',
+  '加载用户分类消耗失败': 'Failed to load user category usage',
+  '该用户尚未同步消耗数据': 'No usage data has been synced for this user yet',
+  '用户登录后系统会自动同步。': 'Usage will sync automatically after the user signs in.',
+  '最近同步': 'Last Synced',
+  '分类数量': 'Category Count',
+  '渠道数量': 'Channel Count',
+  '启用渠道': 'Active Channels',
+  '总消耗额度': 'Total Usage Quota',
+  '从上游同步并更新数据库': 'Sync from upstream and update the database',
   '暂无用户映射': 'No User Mappings',
   '点击“新增映射”创建第一条用户映射。': 'Click “Add Mapping” to create the first user mapping.',
   '账号类型': 'Account Type',
-  '主账号': 'Primary Account',
+  '账号ID': 'Account ID',
+  '账号ID必须为正整数': 'Account ID must be a positive integer',
+  '选择账号类型，填写对应的 GYS 用户 ID。': 'Select the account type and enter its GYS user ID.',
   '子账号 ID': 'Sub-account ID',
   '子账号 ID 必须为正整数': 'Sub-account ID must be a positive integer',
-  '上游用户 ID': 'Upstream User ID',
   '更新时间': 'Updated At',
+  '数据同步时间': 'Data synced at',
+  '本站用户名': 'Local username',
+  '启用同步': 'Enable sync',
+  '禁用同步': 'Disable sync',
+  '已启用同步': 'Sync enabled',
+  '已禁用同步': 'Sync disabled',
+  '所属GYS用户名': 'Parent GYS username',
+  '已同步到用户映射，已有映射信息已保留': 'Synced to user mappings. Existing mapping details were preserved.',
+  '同步用户映射失败': 'Failed to sync user mapping',
   '启用映射': 'Enable mapping',
-  '启用后，用户可以使用本站用户名登录。': 'When enabled, the user can sign in with the site username.',
+  '启用后，用户可以使用用户名登录。': 'When enabled, the user can sign in with the username.',
   '保存映射': 'Save Mapping',
   '请输入有效的显示名': 'Enter a valid display name',
   '当前账号无权限管理子账号': 'This account cannot manage sub-accounts',
-  '管理子账号。': 'Manage sub-accounts.',
-  '管理子账号及其平台模型消耗。': 'Manage sub-accounts and their platform/model usage.',
+  '管理子账号、结算及分类汇率。': 'Manage sub-accounts, settlements, and category rates.',
   '正在检查权限': 'Checking permissions',
   '新增子账号': 'Add Sub-account',
   '创建子账号': 'Create Sub-account',
   '创建中...': 'Creating...',
   '子账号创建成功': 'Sub-account created successfully',
-  '子账号创建成功；需由超级管理员创建并启用映射后才能登录。': 'Sub-account created. A super administrator must create and enable its mapping before it can sign in.',
+  '子账号创建成功，可使用 GYS 用户名和密码登录本站。': 'Sub-account created. Sign in using its GYS username and password.',
   '编辑': 'Edit',
   '编辑子账号': 'Edit Sub-account',
   '保存修改': 'Save Changes',
@@ -810,12 +861,10 @@ const englishTranslations: Record<string, string> = {
   '删除 {{name}}': 'Delete {{name}}',
   '请输入用户名': 'Enter a username',
   '请输入GYS用户名': 'Enter a GYS username',
-  '本站用户名': 'Site Username',
   'GYS用户名': 'GYS Username',
   '未映射': 'Not mapped',
-  '本站登录用户名': 'Username for this site',
   'GYS登录用户名': 'Username on GYS',
-  '本站用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
+  '用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores',
   'GYS用户名须为3至64位字母、数字、点、横线或下划线': 'Use 3–64 letters, numbers, dots, hyphens, or underscores for the GYS username',
   '请输入显示名': 'Enter a display name',
   '登录用户名': 'Login username',
@@ -1169,6 +1218,7 @@ const openApiErrors = [
 
 const API_CACHE_TTL = 12_000;
 const MODEL_GAPS_REFRESH_INTERVAL_MS = 3 * 60_000;
+const CHANNEL_SUMMARY_REFRESH_INTERVAL_MS = 3 * 60_000;
 const apiCache = new Map<string, { expiresAt: number; value: unknown }>();
 const pendingApiRequests = new Map<string, Promise<unknown>>();
 const USER_CACHE_KEY = 'gys:profile:v3';
@@ -1310,6 +1360,24 @@ function formatQuota(value?: number, digits = 4) {
 
 function formatInteger(value?: number) {
   return Number(value || 0).toLocaleString('zh-CN');
+}
+
+function formatNumericText(value?: string | number) {
+  const raw = String(value ?? '0').trim();
+  if (!/^\d+(?:\.\d+)?$/.test(raw)) return '0';
+  const [whole, fraction = ''] = raw.split('.');
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  const cleanFraction = fraction.replace(/0+$/, '');
+  return cleanFraction ? `${grouped}.${cleanFraction}` : grouped;
+}
+
+function formatDollarText(value?: string | number) {
+  const amount = Number(value ?? 0);
+  if (!Number.isFinite(amount)) return '0.00';
+  return amount.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function formatDate(value?: string | null, language: Language = 'zh') {
@@ -1683,16 +1751,22 @@ function EmptyState({
 }
 
 function NoticeBanner({ notice }: { notice: Notice | null }) {
-  if (!notice) return null;
-  return (
-    <div className={`notice notice-${notice.type}`}>
-      {notice.type === 'ok' ? (
-        <CheckCircle2 size={18} />
-      ) : (
-        <AlertTriangle size={18} />
-      )}
+  const { t } = useLanguage();
+  const [visible, setVisible] = useState(false);
+  useEffect(() => {
+    setVisible(Boolean(notice));
+    if (!notice) return;
+    const timer = window.setTimeout(() => setVisible(false), notice.type === 'ok' ? 4000 : 8000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  if (!notice || !visible || typeof document === 'undefined') return null;
+  return createPortal(
+    <div className={`notice notice-${notice.type} app-notice-toast`} role={notice.type === 'error' ? 'alert' : 'status'}>
+      {notice.type === 'ok' ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
       <span>{notice.text}</span>
-    </div>
+      <button type="button" aria-label={t('关闭')} onClick={() => setVisible(false)}><X size={16} /></button>
+    </div>,
+    document.body,
   );
 }
 
@@ -2728,6 +2802,7 @@ function UploadView({ userId }: { userId: number }) {
   const [standby, setStandby] = useState(false);
   const [advanced, setAdvanced] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [showAllMobileCategories, setShowAllMobileCategories] = useState(false);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [results, setResults] = useState<Array<Record<string, unknown>>>([]);
 
@@ -2981,7 +3056,10 @@ function UploadView({ userId }: { userId: number }) {
               </div>
               <span className="upload-current-category">{categoryLabel(category, language)}</span>
             </div>
-            <div className="upload-category-grid">
+            <div
+              className={`upload-category-grid${showAllMobileCategories ? ' is-expanded' : ''}`}
+              id="upload-category-grid"
+            >
               {visibleCategoryCards.map((card) => {
                 const isActive = card.categories.includes(category);
                 return (
@@ -3000,6 +3078,19 @@ function UploadView({ userId }: { userId: number }) {
                 );
               })}
             </div>
+
+            {visibleCategoryCards.length > 2 && !showAllMobileCategories && (
+              <button
+                aria-controls="upload-category-grid"
+                aria-expanded="false"
+                className="ghost-button compact upload-category-show-all"
+                onClick={() => setShowAllMobileCategories(true)}
+                type="button"
+              >
+                {t('查看全部')}
+                <ChevronDown aria-hidden="true" size={15} />
+              </button>
+            )}
 
             {activeCategoryCard && activeCategoryCard.categories.length > 1 && (
               <div className="upload-category-variants">
@@ -3079,16 +3170,21 @@ function UploadView({ userId }: { userId: number }) {
                       </div>
                       {models.length ? (
                         <div className="chip-grid">
-                          {models.map((model) => (
-                            <button
-                              className={selectedModels.includes(model) ? 'chip selected' : 'chip'}
-                              key={model}
-                              onClick={() => toggleModel(model)}
-                              type="button"
-                            >
-                              {model}
-                            </button>
-                          ))}
+                          {models.map((model) => {
+                            const isSelected = selectedModels.includes(model);
+                            return (
+                              <button
+                                aria-pressed={isSelected}
+                                className={isSelected ? 'chip selected' : 'chip'}
+                                key={model}
+                                onClick={() => toggleModel(model)}
+                                type="button"
+                              >
+                                <span className="upload-model-name">{model}</span>
+                                {isSelected && <CheckCircle2 aria-hidden="true" className="upload-model-check" size={14} />}
+                              </button>
+                            );
+                          })}
                         </div>
                       ) : (
                         <span className="muted">{t('该分类暂未返回模型范围，默认使用全部模型。')}</span>
@@ -3339,11 +3435,8 @@ function MyChannelsView() {
           page_size: String(pageSize),
         });
         applyCommonFilters(groupParams);
-        const summaryParams = new URLSearchParams();
-        applyCommonFilters(summaryParams);
-        const summaryQuery = summaryParams.toString();
         const [summaryData, tagData, groupData] = await Promise.all([
-          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh: true }),
+          api<ChannelSummary>('/api/channels/summary', { fresh: true }),
           api<string[]>('/api/channels/tags', { fresh }),
           api<{ items?: ChannelGroupSummary[]; total?: number; total_groups?: number }>(
             `/api/channels/tag-summary?${groupParams.toString()}`,
@@ -3358,11 +3451,8 @@ function MyChannelsView() {
       } else {
         const params = new URLSearchParams({ page: String(listPage), page_size: String(pageSize) });
         applyListFilters(params);
-        const summaryParams = new URLSearchParams();
-        applyListFilters(summaryParams);
-        const summaryQuery = summaryParams.toString();
         const [summaryData, tagData, listData] = await Promise.all([
-          api<ChannelSummary>(`/api/channels/summary${summaryQuery ? `?${summaryQuery}` : ''}`, { fresh: true }),
+          api<ChannelSummary>('/api/channels/summary', { fresh: true }),
           api<string[]>('/api/channels/tags', { fresh }),
           api<ChannelListData>(`/api/channels?${params.toString()}`, { fresh: true }),
         ]);
@@ -3452,7 +3542,7 @@ function MyChannelsView() {
     setListPage(1);
   }
 
-  function changeCategoryFilter(value: string) {
+  function changeCategoryFilter(value: string | null) {
     setCategory(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
     setGroupPage(1);
     setListPage(1);
@@ -3461,12 +3551,12 @@ function MyChannelsView() {
     setDetailLoading({});
   }
 
-  function changeStatusFilter(value: string) {
+  function changeStatusFilter(value: string | null) {
     setStatus(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
     setListPage(1);
   }
 
-  function changeTagFilter(value: string) {
+  function changeTagFilter(value: string | null) {
     setTag(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
     setListPage(1);
   }
@@ -3767,7 +3857,7 @@ function MyChannelsView() {
         </article>
         <article className="my-channel-summary-card">
           <span>{t('总消耗（全部渠道）')}</span>
-          <strong>{formatQuota(summary.total_quota)}</strong>
+          <strong>{formatQuota(summary.total_quota, 2)}</strong>
         </article>
       </div>
 
@@ -4896,7 +4986,7 @@ function UserMappingDialog({
   const [publicUsername, setPublicUsername] = useState(mapping?.public_username || '');
   const [upstreamUsername, setUpstreamUsername] = useState(mapping?.upstream_username || '');
   const [displayName, setDisplayName] = useState(mapping?.display_name || '');
-  const [accountKind, setAccountKind] = useState<AccountKind>(
+  const [accountKind, setAccountKind] = useState<'primary' | 'sub'>(
     mapping?.account_kind === 'sub' ? 'sub' : 'primary',
   );
   const [upstreamUserId, setUpstreamUserId] = useState(
@@ -4913,7 +5003,7 @@ function UserMappingDialog({
     const nextUpstreamUsername = upstreamUsername.trim();
     const nextDisplayName = displayName.trim();
     if (!/^[A-Za-z0-9_.-]{3,64}$/.test(nextPublicUsername)) {
-      setError(t('本站用户名须为3至64位字母、数字、点、横线或下划线'));
+      setError(t('用户名须为3至64位字母、数字、点、横线或下划线'));
       return;
     }
     if (!/^[A-Za-z0-9_.-]{3,64}$/.test(nextUpstreamUsername)) {
@@ -4926,10 +5016,9 @@ function UserMappingDialog({
     }
     const nextUpstreamUserId = Number(upstreamUserId.trim());
     if (
-      accountKind === 'sub'
-      && (!/^[1-9]\d*$/.test(upstreamUserId.trim()) || !Number.isSafeInteger(nextUpstreamUserId))
+      !/^[1-9]\d*$/.test(upstreamUserId.trim()) || !Number.isSafeInteger(nextUpstreamUserId)
     ) {
-      setError(t('子账号 ID 必须为正整数'));
+      setError(t('账号ID必须为正整数'));
       return;
     }
 
@@ -4947,7 +5036,7 @@ function UserMappingDialog({
             upstream_username: nextUpstreamUsername,
             display_name: nextDisplayName,
             account_kind: accountKind,
-            upstream_user_id: accountKind === 'sub' ? nextUpstreamUserId : null,
+            upstream_user_id: nextUpstreamUserId,
             ...(editing ? { active } : {}),
           },
         },
@@ -4983,7 +5072,7 @@ function UserMappingDialog({
             <DialogHeader>
               <DialogTitle>{t(editing ? '编辑用户映射' : '新增用户映射')}</DialogTitle>
               <DialogDescription>
-                {t('管理本站用户名与 GYS 用户名的映射关系。')}
+                {t('管理用户名与 GYS 用户名的映射关系。')}
               </DialogDescription>
             </DialogHeader>
           </div>
@@ -4996,43 +5085,30 @@ function UserMappingDialog({
             <div className="user-mapping-field">
               <span>{t('账号类型')}</span>
               <Select
-                disabled={saving}
-                onValueChange={value => {
-                  if (value === 'primary' || value === 'sub') {
-                    setAccountKind(value);
-                    if (value === 'primary') setUpstreamUserId('');
-                  }
-                }}
+                disabled={saving || editing}
                 value={accountKind}
+                onValueChange={value => {
+                  if (value === 'primary' || value === 'sub') setAccountKind(value);
+                }}
               >
                 <SelectTrigger aria-label={t('账号类型')} className="user-mapping-select">
-                  <SelectValue>{t(accountKind === 'sub' ? '子账号' : '主账号')}</SelectValue>
+                  <SelectValue>{t(accountKind === 'sub' ? '子账号' : '管理员')}</SelectValue>
                 </SelectTrigger>
-                <SelectContent align="start" alignItemWithTrigger={false}>
-                  <SelectItem value="primary">{t('主账号')}</SelectItem>
+                <SelectContent
+                  align="start"
+                  alignItemWithTrigger={false}
+                  sideOffset={6}
+                  className="user-mapping-select-content"
+                  positionerClassName="user-mapping-select-positioner"
+                >
+                  <SelectItem value="primary">{t('管理员')}</SelectItem>
                   <SelectItem value="sub">{t('子账号')}</SelectItem>
                 </SelectContent>
               </Select>
             </div>
-            {accountKind === 'sub' && (
-              <label className="user-mapping-field">
-                <span>{t('子账号 ID')}</span>
-                <input
-                  autoComplete="off"
-                  disabled={saving}
-                  inputMode="numeric"
-                  min={1}
-                  onChange={event => setUpstreamUserId(event.target.value)}
-                  placeholder={t('上游用户 ID')}
-                  required
-                  step={1}
-                  type="number"
-                  value={upstreamUserId}
-                />
-              </label>
-            )}
+            <p className="muted">{t('选择账号类型，填写对应的 GYS 用户 ID。')}</p>
             <label className="user-mapping-field">
-              <span>{t('本站用户名')}</span>
+              <span>{t('用户名')}</span>
               <input
                 autoComplete="off"
                 autoFocus
@@ -5041,9 +5117,37 @@ function UserMappingDialog({
                 minLength={3}
                 onChange={event => setPublicUsername(event.target.value)}
                 pattern="[A-Za-z0-9_.-]{3,64}"
-                placeholder={t('本站登录用户名')}
+                placeholder={t('用户名')}
                 required
                 value={publicUsername}
+              />
+            </label>
+            <label className="user-mapping-field">
+              <span>{t('显示名')}</span>
+              <input
+                autoComplete="off"
+                disabled={saving}
+                maxLength={128}
+                onChange={event => setDisplayName(event.target.value)}
+                placeholder={t('显示名称')}
+                required
+                value={displayName}
+              />
+            </label>
+            <label className="user-mapping-field">
+              <span>{t('账号ID')}</span>
+              <input
+                autoComplete="off"
+                disabled={saving}
+                inputMode="numeric"
+                min={1}
+                max={Number.MAX_SAFE_INTEGER}
+                onChange={event => setUpstreamUserId(event.target.value)}
+                placeholder="ID"
+                required
+                step={1}
+                type="number"
+                value={upstreamUserId}
               />
             </label>
             <label className="user-mapping-field">
@@ -5060,23 +5164,11 @@ function UserMappingDialog({
                 value={upstreamUsername}
               />
             </label>
-            <label className="user-mapping-field">
-              <span>{t('显示名')}</span>
-              <input
-                autoComplete="off"
-                disabled={saving}
-                maxLength={128}
-                onChange={event => setDisplayName(event.target.value)}
-                placeholder={t('显示名称')}
-                required
-                value={displayName}
-              />
-            </label>
             {editing && (
               <div className="user-mapping-status-row">
                 <div>
                   <strong id="user-mapping-active-label">{t('启用映射')}</strong>
-                  <span id="user-mapping-active-description">{t('启用后，用户可以使用本站用户名登录。')}</span>
+                  <span id="user-mapping-active-description">{t('启用后，用户可以使用用户名登录。')}</span>
                 </div>
                 <Switch
                   aria-describedby="user-mapping-active-description"
@@ -5104,6 +5196,541 @@ function UserMappingDialog({
   );
 }
 
+function UserMappingUsageDialog({
+  mapping,
+  onClose,
+}: {
+  mapping: UserMapping;
+  onClose: () => void;
+}) {
+  const { language, t } = useLanguage();
+  const [attempt, setAttempt] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [snapshot, setSnapshot] = useState<UserChannelUsageSnapshot | null>(null);
+  const [error, setError] = useState('');
+  const [syncError, setSyncError] = useState('');
+  const [settlingItems, setSettlingItems] = useState<UserChannelUsageSnapshot['categories'] | null>(null);
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const selectableItems = (snapshot?.categories || []).filter(item => Number(item.outstandingAmount) >= 1);
+  const selectedItems = selectableItems.filter(item => selectedCategories.includes(item.category));
+  const hasSnapshotRef = useRef(false);
+  const loadedMappingRef = useRef('');
+  const requestVersionRef = useRef(0);
+  const syncingRef = useRef(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const isNewMapping = loadedMappingRef.current !== mapping.public_username;
+    if (isNewMapping) {
+      loadedMappingRef.current = mapping.public_username;
+      hasSnapshotRef.current = false;
+      setSnapshot(null);
+    }
+    const requestVersion = ++requestVersionRef.current;
+    if (!hasSnapshotRef.current) setLoading(true);
+    setError('');
+    api<UserChannelUsageSnapshot>(
+      `/api/user-mappings/${encodeURIComponent(mapping.public_username)}/channel-usage`,
+      { fresh: true, signal: controller.signal },
+    )
+      .then((value) => {
+        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
+          hasSnapshotRef.current = true;
+          setSnapshot(value);
+        }
+      })
+      .catch((failure) => {
+        if (
+          !controller.signal.aborted
+          && requestVersion === requestVersionRef.current
+          && !hasSnapshotRef.current
+        ) {
+          setError(failure instanceof Error ? failure.message : t('加载用户分类消耗失败'));
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && requestVersion === requestVersionRef.current) {
+          setLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [attempt, mapping.public_username, t]);
+
+  useEffect(() => {
+    const timer = window.setInterval(
+      () => {
+        if (!syncingRef.current) setAttempt(value => value + 1);
+      },
+      CHANNEL_SUMMARY_REFRESH_INTERVAL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [mapping.public_username]);
+
+  async function syncUsage() {
+    if (syncingRef.current) return;
+    const requestVersion = ++requestVersionRef.current;
+    syncingRef.current = true;
+    setSyncing(true);
+    setSyncError('');
+    try {
+      const value = await api<UserChannelUsageSnapshot>(
+        `/api/user-mappings/${encodeURIComponent(mapping.public_username)}/channel-usage`,
+        { method: 'POST' },
+      );
+      if (requestVersion === requestVersionRef.current) {
+        hasSnapshotRef.current = true;
+        setSnapshot(value);
+        setError('');
+      }
+    } catch (failure) {
+      if (requestVersion === requestVersionRef.current) {
+        setSyncError(failure instanceof Error ? failure.message : t('同步用量失败'));
+      }
+    } finally {
+      syncingRef.current = false;
+      setSyncing(false);
+    }
+  }
+
+  return (
+    <Dialog onOpenChange={(open) => { if (!open) onClose(); }} open>
+      <DialogContent className="user-usage-dialog" showCloseButton={false}>
+        <div className="user-usage-dialog-header">
+          <div className="user-usage-dialog-heading">
+            <span aria-hidden="true" className="user-usage-dialog-icon"><BarChart3 size={19} /></span>
+            <DialogHeader>
+              <DialogTitle>{t('用户分类消耗')}</DialogTitle>
+              <DialogDescription>{mapping.public_username}</DialogDescription>
+            </DialogHeader>
+          </div>
+          <DialogClose aria-label={t('关闭')} className="user-usage-close" type="button">
+            <X size={18} />
+          </DialogClose>
+        </div>
+
+        <div aria-busy={loading} className="user-usage-dialog-body">
+          {loading ? (
+            <div className="user-usage-state" role="status">
+              <Loader2 className="spin" size={25} />
+              <span>{t('正在读取用户分类消耗')}</span>
+            </div>
+          ) : error ? (
+            <div className="user-usage-state error" role="alert">
+              <AlertTriangle size={25} />
+              <p>{error}</p>
+              <button className="ghost-button compact" onClick={() => setAttempt(value => value + 1)} type="button">
+                <RefreshCcw size={15} />{t('重试')}
+              </button>
+            </div>
+          ) : !snapshot?.available ? (
+            <div className="user-usage-state" role="status">
+              <Database size={28} />
+              <strong>{t('该用户尚未同步消耗数据')}</strong>
+              <span>{t('用户登录后系统会自动同步。')}</span>
+            </div>
+          ) : (
+            <>
+              <section aria-label={t('用户分类消耗')} className="user-usage-overview">
+                <div className="user-usage-primary-metric">
+                  <span>{t('约合美元')}</span>
+                  <strong>${formatDollarText(snapshot.totalAmount)}</strong>
+                  <p>
+                    <span>{t('总消耗额度')}</span>
+                    <b>{formatNumericText(snapshot.totalQuota)}</b>
+                  </p>
+                </div>
+                <dl className="user-usage-counts">
+                  <div><dt>{t('渠道总数')}</dt><dd>{formatInteger(snapshot.channelCount)}</dd></div>
+                  <div><dt>{t('分类数量')}</dt><dd>{formatInteger(snapshot.categories.length)}</dd></div>
+                </dl>
+              </section>
+              <div className="user-usage-details-heading">
+                <strong>{t('分类明细')}</strong>
+                <button className="primary-button compact" type="button" disabled={!selectedItems.length || syncing}
+                  onClick={() => setSettlingItems(selectedItems)}>
+                  {t('批量结算（{{count}}）', { count: selectedItems.length })}
+                </button>
+                <span>{t('共 {{count}} 个分类', { count: snapshot.categories.length })}</span>
+              </div>
+              <div
+                aria-label={t('渠道分类消耗明细')}
+                className="table-wrap user-usage-table-wrap"
+                role="region"
+                tabIndex={0}
+              >
+                <table className="user-usage-table">
+                  <caption className="sr-only">{t('渠道分类消耗明细')}</caption>
+                  <thead>
+                    <tr>
+                      <th scope="col" className="user-usage-selection">
+                        <input type="checkbox" aria-label={t('全选')}
+                          checked={selectableItems.length > 0 && selectedItems.length === selectableItems.length}
+                          ref={node => { if (node) node.indeterminate = selectedItems.length > 0 && selectedItems.length < selectableItems.length; }}
+                          disabled={!selectableItems.length}
+                          onChange={event => setSelectedCategories(event.target.checked ? selectableItems.map(item => item.category) : [])} />
+                      </th>
+                      <th scope="col">{t('渠道分类')}</th>
+                      <th scope="col" className="user-usage-rate">{t('汇率')}</th>
+                      <th scope="col">{t('总消费（$）')}</th>
+                      <th scope="col">{t('已结算（$）')}</th>
+                      <th scope="col">{t('应结算（$）')}</th>
+                      <th scope="col">{t('应支付（USDT）')}</th>
+                      <th scope="col">{t('操作')}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {snapshot.categories.length ? snapshot.categories.map(item => {
+                      const amountDue = item.settledAmount == null ? null : Number(item.amount) - Number(item.settledAmount);
+                      const payable = amountDue == null || item.ratePercent == null ? null : amountDue * Number(item.ratePercent) / 100;
+                      return (
+                        <tr key={item.category}>
+                          <td className="user-usage-selection">
+                            <input type="checkbox" aria-label={`${t('选择')} ${categoryLabel(item.category, language)}`}
+                              checked={selectedItems.some(selected => selected.category === item.category)}
+                              disabled={!(Number(item.outstandingAmount) >= 1)}
+                              onChange={event => setSelectedCategories(current => event.target.checked
+                                ? [...new Set([...current, item.category])] : current.filter(category => category !== item.category))} />
+                          </td>
+                          <th scope="row"><strong>{categoryLabel(item.category, language)}</strong></th>
+                          <td className="user-usage-rate">{item.ratePercent == null ? '—' : `${formatNumericText(item.ratePercent)}%`}</td>
+                          <td className="user-usage-amount">${formatDollarText(item.amount)}</td>
+                          <td className="user-usage-amount">{item.settledAmount == null ? '—' : `$${formatDollarText(item.settledAmount)}`}</td>
+                          <td className="user-usage-amount">{amountDue == null ? '—' : `$${formatDollarText(String(amountDue))}`}</td>
+                          <td className="user-usage-amount">{payable == null ? '—' : formatDollarText(String(payable))}</td>
+                          <td>
+                            <button className="user-mapping-edit-button" type="button"
+                              disabled={!(Number(item.outstandingAmount) >= 1)}
+                              onClick={() => setSettlingItems([item])}>
+                              {t('结算')}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    }) : (
+                      <tr><td className="daily-table-empty" colSpan={8}>{t('暂无数据')}</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="user-usage-dialog-footer">
+          <div className="user-usage-footer-status">
+            {snapshot?.refreshedAt ? (
+              <time dateTime={new Date(snapshot.refreshedAt).toISOString()}>
+                {t('最近同步')}：{formatBeijingDateTime(snapshot.refreshedAt, language)}
+              </time>
+            ) : (
+              <span>{t('该用户尚未同步消耗数据')}</span>
+            )}
+          </div>
+          <button
+            className="ghost-button compact"
+            disabled={loading || syncing}
+            onClick={() => void syncUsage()}
+            title={t('从上游同步并更新数据库')}
+            type="button"
+          >
+            <RefreshCcw className={syncing ? 'spin' : undefined} size={15} />
+            {t(syncing ? '同步中...' : '同步')}
+          </button>
+        </div>
+      </DialogContent>
+      {syncError && (
+        <Dialog open onOpenChange={open => { if (!open) setSyncError(''); }}>
+          <DialogContent className="user-usage-error-dialog" showCloseButton={false}
+            overlayProps={{ forceRender: true, className: 'user-usage-error-overlay' }}>
+            <DialogHeader>
+              <DialogTitle><AlertTriangle size={22} />{t('同步失败')}</DialogTitle>
+              <DialogDescription>{syncError}</DialogDescription>
+            </DialogHeader>
+            <div className="action-row">
+              <button className="primary-button compact" type="button" onClick={() => setSyncError('')}>
+                {t('知道了')}
+              </button>
+            </div>
+          </DialogContent>
+        </Dialog>
+      )}
+      {settlingItems && (
+        <MappingSettlementDialog
+          mapping={mapping}
+          items={settlingItems}
+          onClose={() => setSettlingItems(null)}
+          onSaved={categories => {
+            setSnapshot(current => current ? {
+              ...current,
+              categories: current.categories.map(item => {
+                const category = categories.find(category => category.category === item.category);
+                return category ? { ...item, settledAmount: category.settledAmount, outstandingAmount: category.outstandingAmount, ratePercent: category.ratePercent } : item;
+              }),
+            } : current);
+            setSettlingItems(null);
+            setSelectedCategories([]);
+            setAttempt(value => value + 1);
+          }}
+        />
+      )}
+    </Dialog>
+  );
+}
+
+function wholeSettlementAmount(value: string): string {
+  return (value.split('.')[0] || '0').replace(/^0+(?=\d)/, '');
+}
+
+function constrainSettlementAmount(value: string, maximum: string, previous: string): string {
+  const text = value.trim();
+  if (!text) return '';
+  if (!/^\d+(\.\d*)?$/.test(text)) return previous;
+  const integer = wholeSettlementAmount(text);
+  const limit = wholeSettlementAmount(maximum);
+  return BigInt(integer) > BigInt(limit) ? limit : integer;
+}
+
+function MappingSettlementDialog({ mapping, items, onClose, onSaved }: {
+  mapping: UserMapping;
+  items: UserChannelUsageSnapshot['categories'];
+  onClose: () => void;
+  onSaved: (categories: Array<{ category: string; settledAmount: string; outstandingAmount: string; ratePercent: string }>) => void;
+}) {
+  const { language, t } = useLanguage();
+  const [amounts, setAmounts] = useState<Record<string, string>>(() => Object.fromEntries(items.map(item => [item.category, wholeSettlementAmount(item.outstandingAmount)])));
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (saving) return;
+    if (!items.length) return;
+    for (const item of items) {
+      const text = (amounts[item.category] || '').trim();
+      if (!/^\d+$/.test(text) || Number(text) <= 0) {
+        setError(`${categoryLabel(item.category, language)}：${t('请输入有效的结算消耗额度')}`);
+        return;
+      }
+      if (BigInt(text) > BigInt(wholeSettlementAmount(item.outstandingAmount))) {
+        setError(t('{{category}}：消耗额度不能超过剩余额度 ${{amount}}', {
+          category: categoryLabel(item.category, language), amount: formatNumericText(wholeSettlementAmount(item.outstandingAmount)),
+        }));
+        return;
+      }
+    }
+    setSaving(true);
+    setError('');
+    try {
+      const result = await api<BatchSettlementResponse>(
+        `/api/user-mappings/${encodeURIComponent(mapping.public_username)}/settlements`,
+        { method: 'POST', body: { items: items.map(item => ({ category: item.category, consumptionAmount: amounts[item.category] })) } },
+      );
+      onSaved(result.settlementSummary.categories.map(category => ({
+        ...category,
+        outstandingAmount: Math.max(0, Number(category.amount) - Number(category.settledAmount)).toFixed(4),
+      })));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('提交结算失败'));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <Dialog open disablePointerDismissal={saving} onOpenChange={(open, details) => {
+      if (!open && saving) { details.cancel(); return; }
+      if (!open) onClose();
+    }}>
+      <DialogContent
+        className="account-dialog mapping-settlement-dialog"
+        showCloseButton={false}
+        overlayProps={{ forceRender: true, className: 'mapping-settlement-overlay' }}
+      >
+        <DialogHeader>
+          <DialogTitle>{t('确认结算')}</DialogTitle>
+          <DialogDescription>{mapping.public_username} · {t('已选择 {{count}} 个分类', { count: items.length })}</DialogDescription>
+        </DialogHeader>
+        <form onSubmit={submit} noValidate>
+          <div className="mapping-settlement-items">
+          {items.map(item => (
+          <div className="mapping-settlement-fields" key={item.category}>
+          <div className="mapping-settlement-type">
+            <span>{t('类型')}</span>
+            <strong>{categoryLabel(item.category, language)}</strong>
+          </div>
+          <label>
+            <span className="mapping-settlement-amount-heading">
+              <span>{t('消耗额度')}（$）</span>
+              <span className="mapping-settlement-limit">{t('最多 ${{amount}}', { amount: formatNumericText(wholeSettlementAmount(item.outstandingAmount)) })}</span>
+            </span>
+            <input type="text" inputMode="numeric"
+              required value={amounts[item.category]} disabled={saving}
+              onChange={event => {
+                const value = event.target.value;
+                setError('');
+                setAmounts(current => ({ ...current,
+                  [item.category]: constrainSettlementAmount(value, item.outstandingAmount, current[item.category]),
+                }));
+              }} />
+          </label>
+          <p className="mapping-settlement-rate"><span>{t('汇率')}</span><strong>{item.ratePercent}%</strong></p>
+          <p className="mapping-settlement-channel-total">{t('结算金额')}：<strong>${formatDollarText(String((Number(amounts[item.category]) || 0) * Number(item.ratePercent) / 100))}</strong></p>
+          </div>
+          ))}
+          </div>
+          <div className="mapping-settlement-total">
+            <span>{t('本次交易结算总金额')}</span>
+            <strong>${formatDollarText(String(items.reduce((total, item) => total + (Number(amounts[item.category]) || 0) * Number(item.ratePercent) / 100, 0)))}</strong>
+          </div>
+          <NoticeBanner notice={error ? { type: 'error', text: error } : null} />
+          <div className="account-dialog-actions">
+            <button className="ghost-button" type="button" disabled={saving} onClick={onClose}>{t('取消')}</button>
+            <button className="primary-button compact" type="submit" disabled={saving}>
+              {saving && <Loader2 className="spin" size={15} />}{t(saving ? '保存中...' : '确认结算')}
+            </button>
+          </div>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function DeleteUserMappingDialog({ mapping, onClose, onDeleted }: {
+  mapping: UserMapping;
+  onClose: () => void;
+  onDeleted: () => Promise<void>;
+}) {
+  const { t } = useLanguage();
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState('');
+
+  async function remove() {
+    if (deleting) return;
+    setDeleting(true);
+    setError('');
+    try {
+      await api(`/api/user-mappings/${encodeURIComponent(mapping.public_username)}`, { method: 'DELETE' });
+      await onDeleted();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('删除用户映射失败'));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={open => { if (!open && !deleting) onClose(); }}>
+      <DialogContent showCloseButton={false} className="channel-confirm-dialog delete user-mapping-delete-dialog">
+        <header className="channel-confirm-header">
+          <span className="channel-confirm-icon" aria-hidden="true"><Trash2 size={19} /></span>
+          <div className="channel-confirm-heading"><DialogTitle>{t('确认删除用户映射')}</DialogTitle></div>
+          <button aria-label={t('关闭')} className="channel-confirm-close" disabled={deleting} onClick={onClose} type="button"><X size={18} /></button>
+        </header>
+        <div className="channel-confirm-body">
+          <p>{t('确定删除用户映射“{{name}}”吗？', { name: mapping.public_username })}</p>
+          <DialogDescription>{t('删除后，该用户将退出本站且无法登录，直到重新创建映射。GYS 上游账号将保留。')}</DialogDescription>
+          {error && <p className="account-dialog-error" role="alert">{error}</p>}
+        </div>
+        <footer className="channel-confirm-footer">
+          <button className="ghost-button" disabled={deleting} onClick={onClose} type="button">{t('取消')}</button>
+          <button className="channel-confirm-submit danger" disabled={deleting} onClick={() => void remove()} type="button">
+            {deleting && <Loader2 className="spin" size={15} />}
+            {t(deleting ? '正在删除...' : '删除')}
+          </button>
+        </footer>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function UserMappingSettlementsDialog({ mapping, onClose }: {
+  mapping: UserMapping;
+  onClose: () => void;
+}) {
+  const { language, t } = useLanguage();
+  const [transactions, setTransactions] = useState<SettlementTransaction[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError('');
+    api<CategoryRateResponse>(`/api/user-mappings/${encodeURIComponent(mapping.public_username)}/category-rates`, {
+      fresh: true, signal: controller.signal,
+    }).then(data => {
+      if (!controller.signal.aborted) setTransactions(data.settlementTransactions || []);
+    }).catch(failure => {
+      if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
+    }).finally(() => {
+      if (!controller.signal.aborted) setLoading(false);
+    });
+    return () => controller.abort();
+  }, [mapping.public_username, attempt, t]);
+  return (
+    <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
+      <DialogContent className="user-usage-dialog mapping-settlements-dialog" showCloseButton={false}>
+        <div className="user-usage-dialog-header">
+          <DialogHeader>
+            <DialogTitle>{t('查看结算')}</DialogTitle>
+            <DialogDescription>{mapping.public_username} · ID {mapping.upstream_user_id ?? '-'}</DialogDescription>
+          </DialogHeader>
+          <DialogClose aria-label={t('关闭')} className="user-usage-close" type="button"><X size={18} /></DialogClose>
+        </div>
+        <div className="user-usage-dialog-body" aria-busy={loading}>
+          {loading ? (
+            <div className="user-usage-state" role="status"><Loader2 className="spin" size={24} />{t('正在加载结算数据')}</div>
+          ) : error ? (
+            <div className="user-usage-state error" role="alert">
+              <AlertTriangle size={24} /><p>{error}</p>
+              <button className="ghost-button compact" type="button" onClick={() => setAttempt(value => value + 1)}>{t('重试')}</button>
+            </div>
+          ) : transactions.length ? (
+            <div className="settlement-transaction-list">
+              {transactions.map(transaction => (
+                <section className="settlement-transaction-card" key={transaction.id}>
+                  <header className="settlement-transaction-header">
+                    <div>
+                      <strong>{formatBeijingDateTime(transaction.createdAt, language)}</strong>
+                      <span>{t(transaction.legacy ? '历史记录' : '交易编号')}：{transaction.id}</span>
+                    </div>
+                    <div className="settlement-transaction-total">
+                      <span>{t('本次交易结算总金额')}</span>
+                      <strong>${formatNumericText(transaction.totalSettlementAmount)}</strong>
+                    </div>
+                  </header>
+                  <div className="table-wrap" role="region" aria-label={`${t('交易编号')} ${transaction.id}`} tabIndex={0}>
+                    <table className="mapping-settlements-table">
+                      <thead><tr>
+                        <th>{t('渠道分类')}</th><th>{t('消耗额度')}（$）</th>
+                        <th>{t('结算汇率')}</th><th>{t('结算金额')}（$）</th>
+                      </tr></thead>
+                      <tbody>{transaction.items.map(record => (
+                        <tr key={record.id}>
+                          <td>{categoryLabel(record.category, language)}</td>
+                          <td>${formatNumericText(record.consumptionAmount)}</td>
+                          <td>{formatNumericText(record.ratePercent)}%</td>
+                          <td className="mapping-settlement-record-amount">${formatNumericText(record.settlementAmount)}</td>
+                        </tr>
+                      ))}</tbody>
+                    </table>
+                  </div>
+                  {transaction.legacy && <p className="settlement-transaction-legacy">{t('旧记录未保存交易编号，按原记录单独展示。')}</p>}
+                </section>
+              ))}
+            </div>
+          ) : <div className="user-usage-state"><Database size={26} /><span>{t('暂无结算记录')}</span></div>}
+        </div>
+        <div className="user-usage-dialog-footer">
+          <span className="user-usage-footer-status">{t('显示最近100笔交易')}</span>
+          <button className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>
+            <RefreshCcw size={15} className={loading ? 'spin' : undefined} />{t('刷新')}
+          </button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 function UserMappingsView() {
   const { language, t } = useLanguage();
   const [items, setItems] = useState<UserMapping[]>([]);
@@ -5111,6 +5738,24 @@ function UserMappingsView() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingMapping, setEditingMapping] = useState<UserMapping | null>(null);
+  const [usageMapping, setUsageMapping] = useState<UserMapping | null>(null);
+  const [deletingMapping, setDeletingMapping] = useState<UserMapping | null>(null);
+  const [rateMapping, setRateMapping] = useState<UserMapping | null>(null);
+  const [settlementMapping, setSettlementMapping] = useState<UserMapping | null>(null);
+  const [togglingSync, setTogglingSync] = useState<string | null>(null);
+  async function toggleSync(mapping: UserMapping) {
+    if (togglingSync) return;
+    setTogglingSync(mapping.public_username);
+    try {
+      const result = await api<{ sync_enabled: boolean }>(`/api/user-mappings/${mapping.public_username}/sync-setting`, {
+        method: 'PUT', body: { enabled: !mapping.sync_enabled },
+      });
+      setItems(current => current.map(item => item.public_username === mapping.public_username ? { ...item, sync_enabled: result.sync_enabled } : item));
+      setNotice({ type: 'ok', text: t(result.sync_enabled ? '已启用同步' : '已禁用同步') });
+    } catch (error) {
+      setNotice({ type: 'error', text: error instanceof Error ? error.message : t('操作失败') });
+    } finally { setTogglingSync(null); }
+  }
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
@@ -5118,11 +5763,13 @@ function UserMappingsView() {
     try {
       const data = await api<UserMappingListResponse>('/api/user-mappings', { fresh });
       setItems(data.items || []);
+      return true;
     } catch (failure) {
       setNotice({
         type: 'error',
         text: failure instanceof Error ? failure.message : t('加载用户映射失败'),
       });
+      return false;
     } finally {
       setLoading(false);
     }
@@ -5144,6 +5791,14 @@ function UserMappingsView() {
     setNotice({ type: 'ok', text: t('用户映射更新成功') });
   }
 
+  async function handleDeleted() {
+    setDeletingMapping(null);
+    setItems(current => current.filter(item => item.public_username !== deletingMapping?.public_username));
+    if (await load(true)) {
+      setNotice({ type: 'ok', text: t('用户映射删除成功') });
+    }
+  }
+
   return (
     <section className="user-mappings-page">
       <PageHeading
@@ -5160,7 +5815,7 @@ function UserMappingsView() {
           </div>
         )}
         icon={Users}
-        subtitle={t('管理本站用户名与 GYS 用户名的映射关系。')}
+        subtitle={t('管理用户名与 GYS 用户名的映射关系。')}
         title={t('用户映射')}
       />
       <NoticeBanner notice={notice} />
@@ -5176,12 +5831,15 @@ function UserMappingsView() {
               <thead>
                 <tr>
                   <th>ID</th>
-                  <th>{t('本站用户名')}</th>
-                  <th>{t('GYS用户名')}</th>
+                  <th>{t('用户名')}</th>
                   <th>{t('显示名')}</th>
+                  <th>{t('GYS用户名')}</th>
+                  <th>{t('所属GYS用户名')}</th>
                   <th>{t('账号类型')}</th>
                   <th>{t('状态')}</th>
                   <th>{t('更新时间')}</th>
+                  <th>{t('同步')}</th>
+                  <th>{t('数据同步时间')}</th>
                   <th>{t('操作')}</th>
                 </tr>
               </thead>
@@ -5190,12 +5848,14 @@ function UserMappingsView() {
                   <tr key={item.public_username}>
                     <td><code className="user-mapping-user-id">{item.upstream_user_id ?? '-'}</code></td>
                     <td><strong>{item.public_username}</strong></td>
-                    <td><code>{item.upstream_username}</code></td>
                     <td>{item.display_name || '-'}</td>
+                    <td><code>{item.upstream_username}</code></td>
+                    <td>{item.account_kind === 'sub' && item.parent_gys_username
+                      ? <code title={`ID ${item.parent_upstream_user_id}`}>{item.parent_gys_username}</code> : '—'}</td>
                     <td>
                       <Badge tone={item.account_kind === 'primary' ? 'blue' : item.account_kind === 'sub' ? 'purple' : 'neutral'}>
                         {item.account_kind === 'primary'
-                          ? t('主账号')
+                          ? t('管理员')
                           : item.account_kind === 'sub'
                             ? t('子账号')
                             : item.account_kind}
@@ -5203,16 +5863,59 @@ function UserMappingsView() {
                     </td>
                     <td><Badge tone={item.active ? 'green' : 'red'}>{t(item.active ? '启用' : '停用')}</Badge></td>
                     <td>{formatBeijingDateTime(item.updated_at, language)}</td>
+                    <td><Badge tone={item.can_sync ? 'green' : 'neutral'}>{item.can_sync ? 'Yes' : 'No'}</Badge></td>
+                    <td>{item.data_synced_at ? formatBeijingDateTime(item.data_synced_at, language) : '—'}</td>
                     <td>
-                      <button
-                        aria-label={t('编辑 {{name}}', { name: item.public_username })}
-                        className="user-mapping-edit-button"
-                        onClick={() => setEditingMapping(item)}
-                        type="button"
-                      >
-                        <Pencil size={14} />
-                        {t('编辑')}
-                      </button>
+                      <div className="user-mapping-actions">
+                        {item.account_kind === 'primary' && <button className="user-mapping-edit-button" type="button"
+                          disabled={togglingSync !== null} onClick={() => void toggleSync(item)}>
+                          <RefreshCcw size={14} />{t(item.sync_enabled ? '禁用同步' : '启用同步')}
+                        </button>}
+                        <button
+                          aria-label={t('查看 {{name}} 的结算记录', { name: item.public_username })}
+                          className="user-mapping-edit-button"
+                          onClick={() => setSettlementMapping(item)}
+                          type="button"
+                        >
+                          <Eye size={14} />{t('查看结算')}
+                        </button>
+                        <button
+                          aria-label={t('为 {{name}} 设置汇率', { name: item.public_username })}
+                          className="user-mapping-edit-button"
+                          onClick={() => setRateMapping(item)}
+                          type="button"
+                        >
+                          <CircleDollarSign size={14} />
+                          {t('设置汇率')}
+                        </button>
+                        <button
+                          aria-label={t('查看 {{name}} 的分类消耗', { name: item.public_username })}
+                          className="user-mapping-usage-button"
+                          onClick={() => setUsageMapping(item)}
+                          type="button"
+                        >
+                          <BarChart3 size={14} />
+                          {t('查看分类消耗')}
+                        </button>
+                        <button
+                          aria-label={t('编辑 {{name}}', { name: item.public_username })}
+                          className="user-mapping-edit-button"
+                          onClick={() => setEditingMapping(item)}
+                          type="button"
+                        >
+                          <Pencil size={14} />
+                          {t('编辑')}
+                        </button>
+                        <button
+                          aria-label={t('删除 {{name}}', { name: item.public_username })}
+                          className="user-mapping-delete-button"
+                          onClick={() => setDeletingMapping(item)}
+                          type="button"
+                        >
+                          <Trash2 size={14} />
+                          {t('删除')}
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -5232,6 +5935,39 @@ function UserMappingsView() {
           mapping={editingMapping}
           onClose={() => setEditingMapping(null)}
           onSaved={handleUpdated}
+        />
+      )}
+      {usageMapping && (
+        <UserMappingUsageDialog
+          key={usageMapping.public_username}
+          mapping={usageMapping}
+          onClose={() => setUsageMapping(null)}
+        />
+      )}
+      {deletingMapping && (
+        <DeleteUserMappingDialog
+          mapping={deletingMapping}
+          onClose={() => setDeletingMapping(null)}
+          onDeleted={handleDeleted}
+        />
+      )}
+      {rateMapping && (
+        <SubAccountRateDialog
+          key={rateMapping.public_username}
+          account={{ id: rateMapping.upstream_user_id, username: rateMapping.public_username, display_name: rateMapping.display_name }}
+          endpoint={`/api/user-mappings/${encodeURIComponent(rateMapping.public_username)}/category-rates`}
+          onClose={() => setRateMapping(null)}
+          onSaved={() => {
+            setRateMapping(null);
+            setNotice({ type: 'ok', text: t('汇率保存成功') });
+          }}
+        />
+      )}
+      {settlementMapping && (
+        <UserMappingSettlementsDialog
+          key={settlementMapping.public_username}
+          mapping={settlementMapping}
+          onClose={() => setSettlementMapping(null)}
         />
       )}
     </section>
@@ -5728,181 +6464,6 @@ function AnnouncementManagementView() {
   );
 }
 
-function SubAccountUsageDialog({
-  account,
-  onClose,
-}: {
-  account: SubAccount;
-  onClose: () => void;
-}) {
-  const { language, t } = useLanguage();
-  const [attempt, setAttempt] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [summary, setSummary] = useState<SubAccountUsageSummary | null>(null);
-  const [error, setError] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState(channelUsageCategories[0]);
-  const categoryOptions = useMemo(() => channelUsageCategories.map((category) => ({
-    key: category,
-    name: categoryLabel(category, language),
-    color: dashboardCategoryColor(category),
-    stats: summary?.categories.find((item) => item.category === category),
-  })), [language, summary]);
-  const selectedCategory = categoryOptions.find((category) => category.key === categoryFilter);
-  const visibleRows = useMemo(() => {
-    if (!summary || !selectedCategory) return summary?.rows || [];
-    const categoryTotal = Number(selectedCategory.stats?.amount || 0);
-    return summary.rows
-      .filter((row) => row.category === selectedCategory.key)
-      .map((row) => ({
-        ...row,
-        sharePercent: categoryTotal > 0
-          ? (Number(row.amount) / categoryTotal * 100).toFixed(2)
-          : '0.00',
-      }));
-  }, [selectedCategory, summary]);
-  useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setSummary(null);
-    setError('');
-    api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage`, {
-      fresh: true,
-      signal: controller.signal,
-    })
-      .then((value) => {
-        if (!controller.signal.aborted) {
-          setSummary(value);
-        }
-      })
-      .catch((failure) => {
-        if (!controller.signal.aborted) {
-          setError(failure instanceof Error ? failure.message : t('加载子账号消耗失败'));
-        }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [account.id, attempt, t]);
-
-  return (
-    <div
-      className="dialog-backdrop sub-account-usage-backdrop"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) onClose();
-      }}
-      role="presentation"
-    >
-      <section
-        aria-labelledby="sub-account-usage-title"
-        aria-modal="true"
-        className="sub-account-usage-dialog"
-        role="dialog"
-      >
-        <header className="sub-account-usage-header">
-          <div>
-            <h2 id="sub-account-usage-title"><BarChart3 size={20} />{t('渠道分类总消耗')}</h2>
-          </div>
-          <div className="sub-account-usage-tools">
-            <button
-              aria-label={t('刷新')}
-              disabled={loading}
-              onClick={() => setAttempt((value) => value + 1)}
-              title={t('刷新')}
-              type="button"
-            >
-              <RefreshCcw className={loading ? 'spin' : ''} size={17} />
-            </button>
-            <button aria-label={t('关闭')} onClick={onClose} title={t('关闭')} type="button"><X size={19} /></button>
-          </div>
-        </header>
-        <div aria-busy={loading} className="sub-account-usage-body">
-          {loading ? (
-            <div className="sub-account-usage-state" role="status">
-              <Loader2 className="spin" size={25} />
-              <span>{t('正在读取渠道分类总消耗')}</span>
-            </div>
-          ) : error ? (
-            <div className="sub-account-usage-state error" role="alert">
-              <AlertTriangle size={25} />
-              <p>{error}</p>
-              <button className="ghost-button compact" onClick={() => setAttempt((value) => value + 1)} type="button">
-                <RefreshCcw size={15} />{t('重试')}
-              </button>
-            </div>
-          ) : summary && (
-            <>
-              <p className="sub-account-usage-category-title">{t('渠道分类总消耗')}</p>
-              <div className="sub-account-usage-categories" aria-label={t('渠道分类总消耗')} role="group">
-                {categoryOptions.map((category) => (
-                  <button
-                    className={categoryFilter === category.key ? 'active' : ''}
-                    key={category.key}
-                    onClick={() => setCategoryFilter(category.key)}
-                    style={{ '--category-color': category.color } as CSSProperties}
-                    type="button"
-                  >
-                    <span className="sub-account-usage-category-letter">{category.name[0]}</span>
-                    <strong>{category.name}</strong>
-                    <span className="sub-account-usage-financials">
-                      <small className="total">{t('总消耗')} ${category.stats?.amount || '0.0000'}</small>
-                      <small className="settled">{t('已结算')} ${category.stats?.settledAmount || '0.0000'}</small>
-                      <small className="payable">{t('应付')} ${category.stats?.payableAmount || '0.0000'}</small>
-                    </span>
-                  </button>
-                ))}
-              </div>
-              {visibleRows.length > 0 && (
-                <div className="table-wrap">
-                  <table className="sub-account-usage-table">
-                    <thead>
-                      <tr>
-                        <th>{t('渠道分类')}</th>
-                        <th>{t('模型')}</th>
-                        <th>{t('匹配标签')}</th>
-                        <th>{t('渠道记录')}</th>
-                        <th>{t('请求记录')}</th>
-                        <th>{t('消耗总量')}</th>
-                        <th>{t('占比')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleRows.map((row) => (
-                        <tr key={`${row.category}-${row.model}`}>
-                          <td>{row.category ? categoryLabel(row.category, language) : '-'}</td>
-                          <td><code>{row.model || t('未归属模型')}</code></td>
-                          <td>{formatInteger(row.tagCount)}</td>
-                          <td>{formatInteger(row.channelCount)}</td>
-                          <td>{formatInteger(row.requestCount)}</td>
-                          <td className="sub-account-usage-amount">${row.amount}</td>
-                          <td>
-                            <span className="sub-account-usage-share">
-                              <i aria-hidden="true"><b style={{ width: `${row.sharePercent}%` }} /></i>
-                              {row.sharePercent}%
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </>
-          )}
-        </div>
-        <footer className="sub-account-usage-footer">
-          {summary && (
-            <strong className="sub-account-total-payable">
-              {t('总应付')}：<span>${summary.totalPayableAmount || '0.0000'}</span>
-            </strong>
-          )}
-          <button className="ghost-button compact" onClick={onClose} type="button">{t('关闭')}</button>
-        </footer>
-      </section>
-    </div>
-  );
-}
-
 function SubAccountSettlementDialog({
   account,
   onClose,
@@ -5914,46 +6475,55 @@ function SubAccountSettlementDialog({
   const [attempt, setAttempt] = useState(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [summary, setSummary] = useState<SubAccountUsageSummary | null>(null);
+  const [syncing, setSyncing] = useState(false);
+  const [summary, setSummary] = useState<SubAccountSettlementSummary | null>(null);
   const [records, setRecords] = useState<SettlementRecord[]>([]);
-  const [category, setCategory] = useState(channelUsageCategories[0]);
-  const [consumptionAmount, setConsumptionAmount] = useState('');
+  const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [consumptionAmounts, setConsumptionAmounts] = useState<Record<string, string>>({});
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
 
-  const categoryStats = useMemo(
-    () => summary?.categories.find((item) => item.category === category),
-    [category, summary],
+  const categoryStatsByCategory = useMemo(
+    () => new Map(summary?.categories.map((item) => [item.category, item]) || []),
+    [summary],
   );
-  const totalAmount = Number(categoryStats?.amount || 0);
-  const settledAmount = Number(categoryStats?.settledAmount || 0);
-  const availableAmount = Math.max(0, totalAmount - settledAmount);
-  const ratePercent = Number(categoryStats?.ratePercent || 100);
-  const settlementAmount = Math.max(0, Number(consumptionAmount) || 0) * ratePercent / 100;
-  const visibleRecords = useMemo(
-    () => records.filter((record) => record.category === category),
-    [category, records],
-  );
+  const selectableCategories = channelUsageCategories.filter((category) => {
+    const stats = categoryStatsByCategory.get(category);
+    return Math.floor(Math.max(0, Number(stats?.amount || 0) - Number(stats?.settledAmount || 0))) > 0;
+  });
+  const selectedCategoryRows = selectedCategories.map((category) => {
+    const stats = categoryStatsByCategory.get(category);
+    const totalAmount = Number(stats?.amount || 0);
+    const settledAmount = Number(stats?.settledAmount || 0);
+    const availableAmount = Math.floor(Math.max(0, totalAmount - settledAmount));
+    const ratePercent = Number(stats?.ratePercent || 100);
+    const consumptionAmount = Math.max(0, Number(consumptionAmounts[category]) || 0);
+    return {
+      category,
+      totalAmount,
+      availableAmount,
+      ratePercent,
+      consumptionAmount,
+      settlementAmount: consumptionAmount * ratePercent / 100,
+    };
+  });
+  const selectedTotalAmount = selectedCategoryRows.reduce((total, item) => total + item.totalAmount, 0);
+  const selectedAvailableAmount = selectedCategoryRows.reduce((total, item) => total + item.availableAmount, 0);
+  const selectedSettlementAmount = selectedCategoryRows.reduce((total, item) => total + item.settlementAmount, 0);
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
     setError('');
     setNotice('');
-    Promise.all([
-      api<SubAccountUsageSummary>(`/api/sub-accounts/${account.id}/tag-usage`, {
-        fresh: true,
-        signal: controller.signal,
-      }),
-      api<CategoryRateResponse>(`/api/sub-accounts/${account.id}/category-rates`, {
-        fresh: true,
-        signal: controller.signal,
-      }),
-    ])
-      .then(([usage, rateData]) => {
+    api<SubAccountSettlementDataResponse>(`/api/sub-accounts/${account.id}/category-rates?include_settlement=1`, {
+      fresh: true,
+      signal: controller.signal,
+    })
+      .then((value) => {
         if (controller.signal.aborted) return;
-        setSummary(usage);
-        setRecords(rateData.settlementRecords || []);
+        setSummary(value.settlementSummary);
+        setRecords(value.settlementRecords || []);
       })
       .catch((failure) => {
         if (!controller.signal.aborted) {
@@ -5968,51 +6538,74 @@ function SubAccountSettlementDialog({
 
   useEffect(() => {
     if (!summary) return;
-    setConsumptionAmount(availableAmount.toFixed(4));
+    const statsByCategory = new Map(summary.categories.map((item) => [item.category, item]));
+    const nextAmounts: Record<string, string> = {};
+    const nextSelectableCategories = channelUsageCategories.filter((category) => {
+      const stats = statsByCategory.get(category);
+      const available = Math.floor(Math.max(0, Number(stats?.amount || 0) - Number(stats?.settledAmount || 0)));
+      nextAmounts[category] = available.toFixed(0);
+      return available > 0;
+    });
+    setConsumptionAmounts(nextAmounts);
+    setSelectedCategories((current) => {
+      const selectable = new Set(nextSelectableCategories);
+      return current.filter((category) => selectable.has(category));
+    });
     setError('');
-  }, [availableAmount, category, summary]);
+  }, [summary]);
+
+  async function syncUsage() {
+    setSyncing(true);
+    setError('');
+    setNotice('');
+    try {
+      const value = await api<SubAccountSettlementSummary>(
+        `/api/sub-accounts/${account.id}/settlement-usage/sync`,
+        { method: 'POST' },
+      );
+      setSummary(value);
+      setNotice(t('同步用量成功'));
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : t('同步用量失败'));
+    } finally {
+      setSyncing(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const amount = Number(consumptionAmount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      setError(t('请输入有效的结算消耗额度'));
+    if (selectedCategoryRows.length === 0) {
+      setError(t('请选择至少一个可结算分类'));
       return;
     }
-    if (amount > availableAmount + 0.0000001) {
-      setError(t('结算消耗额度不能超过可结算额度'));
-      return;
+    const items: Array<{ category: string; consumptionAmount: string }> = [];
+    for (const item of selectedCategoryRows) {
+      const amountText = (consumptionAmounts[item.category] || '').trim();
+      const amount = Number(amountText);
+      if (!Number.isSafeInteger(amount) || amount <= 0) {
+        setError(`${categoryLabel(item.category, language)}：${t('请输入有效的结算消耗额度')}`);
+        return;
+      }
+      if (amount > item.availableAmount + 0.0000001) {
+        setError(`${categoryLabel(item.category, language)}：${t('结算消耗额度不能超过可结算额度')}`);
+        return;
+      }
+      items.push({ category: item.category, consumptionAmount: amountText });
     }
     setSaving(true);
     setError('');
     setNotice('');
     try {
-      const result = await api<SettlementResponse>(`/api/sub-accounts/${account.id}/settlements`, {
+      const result = await api<BatchSettlementResponse>(`/api/sub-accounts/${account.id}/settlements`, {
         method: 'POST',
-        body: { category, consumptionAmount },
+        body: { items },
       });
-      setRecords((current) => [result.settlement, ...current]);
-      setSummary((current) => {
-        if (!current) return current;
-        const categories = current.categories.map((item) => item.category === category ? {
-          ...item,
-          amount: result.category.totalAmount,
-          settledAmount: result.category.settledAmount,
-          ratePercent: result.category.ratePercent,
-          payableAmount: result.category.payableAmount,
-        } : item);
-        return {
-          ...current,
-          categories,
-          totalPayableAmount: categories.reduce(
-            (total, item) => total + Number(item.payableAmount || 0),
-            0,
-          ).toFixed(4),
-        };
-      });
-      setConsumptionAmount(result.category.outstandingAmount);
-      setNotice(t('结算成功，本次结算金额 ${{amount}}', {
-        amount: result.settlement.settlementAmount,
+      setRecords((current) => [...result.settlements, ...current]);
+      setSummary(result.settlementSummary);
+      setSelectedCategories([]);
+      setNotice(t('批量结算成功，共 {{count}} 个分类，结算金额 ${{amount}}', {
+        count: result.settlements.length,
+        amount: result.totalSettlementAmount,
       }));
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : t('提交结算失败'));
@@ -6025,7 +6618,7 @@ function SubAccountSettlementDialog({
     <div
       className="dialog-backdrop"
       onMouseDown={(event) => {
-        if (event.target === event.currentTarget && !saving) onClose();
+        if (event.target === event.currentTarget && !saving && !syncing) onClose();
       }}
       role="presentation"
     >
@@ -6038,18 +6631,35 @@ function SubAccountSettlementDialog({
         <div className="account-dialog-header sub-account-rate-header">
           <div>
             <h2 id="sub-account-settlement-title"><CheckCircle2 size={20} />{t('渠道分类结算')}</h2>
+            <p>
+              {account.display_name || account.username} · ID {account.id}
+              {summary?.refreshedAt
+                ? ` · ${t('最近同步')}：${formatBeijingDateTime(summary.refreshedAt, language)}`
+                : ''}
+            </p>
           </div>
-          <div className="sub-account-usage-tools">
+          <div className="sub-account-dialog-tools">
+            <button
+              aria-label={t('同步用量')}
+              className="sub-account-sync-button"
+              disabled={loading || saving || syncing}
+              onClick={syncUsage}
+              title={t('同步用量')}
+              type="button"
+            >
+              {syncing ? <Loader2 className="spin" size={16} /> : <Database size={16} />}
+              <span>{t(syncing ? '同步中...' : '同步用量')}</span>
+            </button>
             <button
               aria-label={t('刷新')}
-              disabled={loading || saving}
+              disabled={loading || saving || syncing}
               onClick={() => setAttempt((value) => value + 1)}
               title={t('刷新')}
               type="button"
             >
               <RefreshCcw className={loading ? 'spin' : ''} size={17} />
             </button>
-            <button aria-label={t('关闭')} disabled={saving} onClick={onClose} title={t('关闭')} type="button">
+            <button aria-label={t('关闭')} disabled={saving || syncing} onClick={onClose} title={t('关闭')} type="button">
               <X size={19} />
             </button>
           </div>
@@ -6064,61 +6674,157 @@ function SubAccountSettlementDialog({
           </div>
         ) : (
           <form onSubmit={submit}>
-            <label className="sub-account-settlement-category">
-              <span>{t('渠道分类')}</span>
-              <select
-                disabled={saving}
-                onChange={(event) => {
-                  setCategory(event.target.value);
+            <div className="sub-account-settlement-category">
+              <div className="sub-account-settlement-category-heading">
+                <span>{t('渠道分类')}</span>
+                <div>
+                  <button
+                    disabled={saving || syncing || selectableCategories.length === 0 || selectedCategories.length === selectableCategories.length}
+                    onClick={() => {
+                      setSelectedCategories([...selectableCategories]);
+                      setError('');
+                      setNotice('');
+                    }}
+                    type="button"
+                  >
+                    {t('选择全部可结算')}
+                  </button>
+                  <button
+                    disabled={saving || syncing || selectedCategories.length === 0}
+                    onClick={() => {
+                      setSelectedCategories([]);
+                      setError('');
+                      setNotice('');
+                    }}
+                    type="button"
+                  >
+                    {t('清空选择')}
+                  </button>
+                </div>
+              </div>
+              <Select
+                disabled={saving || syncing || !summary.available}
+                multiple
+                onValueChange={(value) => {
+                  const requested = new Set(value);
+                  const selectable = new Set(selectableCategories);
+                  setSelectedCategories(channelUsageCategories.filter(
+                    (item) => requested.has(item) && selectable.has(item),
+                  ));
+                  setError('');
                   setNotice('');
                 }}
-                value={category}
+                value={selectedCategories}
               >
-                {channelUsageCategories.map((item) => (
-                  <option key={item} value={item}>{categoryLabel(item, language)}</option>
-                ))}
-              </select>
-            </label>
+                <SelectTrigger
+                  aria-label={`${t('渠道分类')}：${selectedCategories.length > 0
+                    ? t('已选择 {{count}} 个分类', { count: selectedCategories.length })
+                    : t('请选择结算分类')}`}
+                  className="sub-account-settlement-select-trigger"
+                >
+                  <SelectValue>
+                    {(value: string[]) => value.length > 0
+                      ? t('已选择 {{count}} 个分类', { count: value.length })
+                      : t('请选择结算分类')}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent
+                  align="start"
+                  alignItemWithTrigger={false}
+                  className="sub-account-settlement-select-content"
+                  positionerClassName="z-[70]"
+                  sideOffset={6}
+                >
+                  {channelUsageCategories.map((item) => {
+                    const stats = categoryStatsByCategory.get(item);
+                    const available = Math.max(
+                      0,
+                      Number(stats?.amount || 0) - Number(stats?.settledAmount || 0),
+                    );
+                    return (
+                      <SelectItem disabled={available <= 0} key={item} value={item}>
+                        <span className="sub-account-settlement-option">
+                          <strong>{categoryLabel(item, language)}</strong>
+                          <small>{t('总消耗')} ${stats?.amount || '0.0000'} · {t('可结算消耗')} ${available.toFixed(0)}</small>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+                </SelectContent>
+              </Select>
+            </div>
+            {!summary.available && (
+              <p className="sub-account-rate-hint">{t('暂无已同步的消耗数据，请点击“同步用量”。')}</p>
+            )}
             <div className="sub-account-settlement-summary">
-              <span><small>{t('总消耗')}</small><strong>${categoryStats?.amount || '0.0000'}</strong></span>
-              <span><small>{t('已结算')}</small><strong>${categoryStats?.settledAmount || '0.0000'}</strong></span>
-              <span><small>{t('可结算消耗')}</small><strong>${availableAmount.toFixed(4)}</strong></span>
-              <span><small>{t('当前汇率')}</small><strong>{categoryStats?.ratePercent || '100'}%</strong></span>
+              <span><small>{t('已选分类')}</small><strong>{selectedCategories.length}</strong></span>
+              <span><small>{t('总消耗')}</small><strong>${selectedTotalAmount.toFixed(4)}</strong></span>
+              <span><small>{t('可结算消耗')}</small><strong>${selectedAvailableAmount.toFixed(0)}</strong></span>
+              <span><small>{t('本次结算金额')}</small><strong>${selectedSettlementAmount.toFixed(4)}</strong></span>
             </div>
-            <div className="sub-account-settlement-calculation">
-              <label>
-                <span>{t('本次消耗额度')}</span>
-                <span className="sub-account-rate-input prefix">
-                  <input
-                    disabled={saving || availableAmount <= 0}
-                    inputMode="decimal"
-                    max={availableAmount.toFixed(4)}
-                    min="0.0001"
-                    onChange={(event) => setConsumptionAmount(event.target.value)}
-                    required
-                    step="0.0001"
-                    type="number"
-                    value={consumptionAmount}
-                  />
-                  <b>$</b>
-                </span>
-              </label>
-              <span className="sub-account-settlement-result">
-                <small>{t('本次结算金额')}</small>
-                <strong>${settlementAmount.toFixed(4)}</strong>
-              </span>
-            </div>
-            <p className="sub-account-rate-hint">{t('本次结算金额 = 消耗额度 × 结算汇率。')}</p>
-            {notice && <p className="sub-account-settlement-notice" role="status"><CheckCircle2 size={16} />{notice}</p>}
+            <section className="sub-account-settlement-items">
+              <h3>{t('本次结算明细')}</h3>
+              {selectedCategoryRows.length > 0 ? (
+                <div className="sub-account-settlement-item-list">
+                  {selectedCategoryRows.map((item) => (
+                    <div className="sub-account-settlement-item" key={item.category}>
+                      <span className="sub-account-settlement-item-name">
+                        <strong>{categoryLabel(item.category, language)}</strong>
+                        <small>{t('可结算 ${{amount}} · 汇率 {{rate}}%', {
+                          amount: item.availableAmount.toFixed(0),
+                          rate: item.ratePercent,
+                        })}</small>
+                      </span>
+                      <label>
+                        <span>{t('本次消耗额度')}</span>
+                        <span className="sub-account-rate-input prefix">
+                          <input
+                            aria-label={`${categoryLabel(item.category, language)} · ${t('本次消耗额度')}`}
+                            disabled={saving || syncing}
+                            inputMode="numeric"
+                            max={item.availableAmount.toFixed(0)}
+                            min="1"
+                            onChange={(event) => setConsumptionAmounts((current) => ({
+                              ...current,
+                              [item.category]: constrainSettlementAmount(event.target.value, item.availableAmount.toFixed(0), current[item.category] || ''),
+                            }))}
+                            required
+                            step="1"
+                            type="number"
+                            value={consumptionAmounts[item.category] || ''}
+                          />
+                          <b>$</b>
+                        </span>
+                      </label>
+                      <span className="sub-account-settlement-item-result">
+                        <small>{t('结算金额')}</small>
+                        <strong>${item.settlementAmount.toFixed(4)}</strong>
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="sub-account-settlement-items-empty">
+                  {t(selectableCategories.length > 0
+                    ? '请选择结算分类'
+                    : summary.available
+                      ? '暂无可结算分类'
+                      : '暂无已同步的消耗数据，请点击“同步用量”。')}
+                </p>
+              )}
+            </section>
+            <p className="sub-account-rate-hint">{t('本次结算金额 = 各分类消耗额度 × 对应结算汇率之和。')}</p>
+            <NoticeBanner notice={notice ? { type: 'ok', text: notice } : null} />
             {error && <p className="account-dialog-error" role="alert">{error}</p>}
             <section className="sub-account-settlement-history">
               <h3>{t('结算记录')}</h3>
-              {visibleRecords.length > 0 ? (
+              {records.length > 0 ? (
                 <div className="table-wrap sub-account-settlement-history-table-wrap">
                   <table className="sub-account-settlement-history-table">
                     <thead>
                       <tr>
                         <th>{t('结算时间')}</th>
+                        <th>{t('分类')}</th>
                         <th>{t('消耗额度')}</th>
                         <th>{t('结算汇率')}</th>
                         <th>{t('结算金额')}</th>
@@ -6126,9 +6832,10 @@ function SubAccountSettlementDialog({
                       </tr>
                     </thead>
                     <tbody>
-                      {visibleRecords.map((record) => (
+                      {records.map((record) => (
                         <tr key={record.id}>
                           <td>{formatBeijingDateTime(record.createdAt, language)}</td>
+                          <td>{categoryLabel(record.category, language)}</td>
                           <td>${record.consumptionAmount}</td>
                           <td>{record.ratePercent}%</td>
                           <td className={Number(record.settlementAmount) < 0 ? 'negative' : 'positive'}>
@@ -6145,10 +6852,12 @@ function SubAccountSettlementDialog({
               )}
             </section>
             <div className="account-dialog-actions">
-              <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('关闭')}</button>
-              <button className="primary-button compact" disabled={saving || availableAmount <= 0} type="submit">
+              <button className="ghost-button" disabled={saving || syncing} onClick={onClose} type="button">{t('关闭')}</button>
+              <button className="primary-button compact" disabled={saving || syncing || selectedCategories.length === 0} type="submit">
                 {saving && <Loader2 className="spin" size={16} />}
-                {t(saving ? '结算中...' : '确认结算')}
+                {saving
+                  ? t('结算中...')
+                  : t('批量结算（{{count}}）', { count: selectedCategories.length })}
               </button>
             </div>
           </form>
@@ -6160,10 +6869,12 @@ function SubAccountSettlementDialog({
 
 function SubAccountRateDialog({
   account,
+  endpoint = `/api/sub-accounts/${account.id}/category-rates`,
   onClose,
   onSaved,
 }: {
-  account: SubAccount;
+  account: { id: number | null; username: string; display_name?: string };
+  endpoint?: string;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -6171,16 +6882,17 @@ function SubAccountRateDialog({
   const [rates, setRates] = useState<Record<string, string>>(() => Object.fromEntries(
     channelUsageCategories.map((category) => [category, '100']),
   ));
-  const [settlementRecords, setSettlementRecords] = useState<CategoryRateResponse['settlementRecords']>([]);
   const [loading, setLoading] = useState(true);
+  const [loaded, setLoaded] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
+    setLoaded(false);
     setError('');
-    api<CategoryRateResponse>(`/api/sub-accounts/${account.id}/category-rates`, {
+    api<CategoryRateResponse>(endpoint, {
       fresh: true,
       signal: controller.signal,
     })
@@ -6190,7 +6902,7 @@ function SubAccountRateDialog({
           category,
           value.rates.find((item) => item.category === category)?.ratePercent || '100',
         ])));
-        setSettlementRecords(value.settlementRecords || []);
+        setLoaded(true);
       })
       .catch((failure) => {
         if (!controller.signal.aborted) {
@@ -6201,13 +6913,14 @@ function SubAccountRateDialog({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [account.id, t]);
+  }, [endpoint, t]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (saving || !loaded) return;
     const invalid = channelUsageCategories.some((category) => {
       const value = Number(rates[category]);
-      return !Number.isFinite(value) || value < 0 || value > 100000;
+      return !rates[category].trim() || !Number.isFinite(value) || value < 0 || value > 100000;
     });
     if (invalid) {
       setError(t('汇率须在 0% 至 100000% 之间'));
@@ -6216,7 +6929,7 @@ function SubAccountRateDialog({
     setSaving(true);
     setError('');
     try {
-      await api(`/api/sub-accounts/${account.id}/category-rates`, {
+      await api(endpoint, {
         method: 'PUT',
         body: { rates },
       });
@@ -6239,13 +6952,13 @@ function SubAccountRateDialog({
       <section
         aria-labelledby="sub-account-rate-title"
         aria-modal="true"
-        className="account-dialog sub-account-rate-dialog"
+        className="account-dialog sub-account-rate-dialog compact-rate-dialog"
         role="dialog"
       >
         <div className="account-dialog-header sub-account-rate-header">
           <div>
             <h2 id="sub-account-rate-title"><CircleDollarSign size={20} />{t('渠道分类汇率')}</h2>
-            <p>{account.display_name || account.username} · ID {account.id}</p>
+            <p>{account.display_name || account.username} · ID {account.id ?? '-'}</p>
           </div>
           <button aria-label={t('关闭')} disabled={saving} onClick={onClose} type="button"><X size={18} /></button>
         </div>
@@ -6255,80 +6968,35 @@ function SubAccountRateDialog({
           </div>
         ) : (
           <form onSubmit={submit}>
-            <p className="sub-account-rate-description">{t('为该用户分别设置每个渠道分类的金额汇率。')}</p>
-            <div className="sub-account-rate-grid">
-              {channelUsageCategories.map((category) => (
-                <div className="sub-account-rate-row" key={category}>
-                  <span className="sub-account-rate-name">
-                    <strong>{categoryLabel(category, language)}</strong>
-                    <small>{category}</small>
+            <div className="compact-rate-grid">
+              {channelUsageCategories.map(category => (
+                <label className="compact-rate-card" key={category}>
+                  <span className="compact-rate-card-title">{categoryLabel(category, language)}</span>
+                  <span className="sub-account-rate-input suffix">
+                    <input
+                      aria-label={`${categoryLabel(category, language)} ${t('汇率')}`}
+                      inputMode="decimal"
+                      max="100000"
+                      min="0"
+                      disabled={saving || !loaded}
+                      onChange={event => setRates(current => ({ ...current, [category]: event.target.value }))}
+                      required
+                      step="0.01"
+                      type="number"
+                      value={rates[category]}
+                    />
+                    <b>%</b>
                   </span>
-                  <label className="sub-account-rate-control">
-                    <span>{t('汇率')}</span>
-                    <span className="sub-account-rate-input suffix">
-                      <input
-                        inputMode="decimal"
-                        max="100000"
-                        min="0"
-                        onChange={(event) => setRates((current) => ({
-                          ...current,
-                          [category]: event.target.value,
-                        }))}
-                        required
-                        step="0.01"
-                        type="number"
-                        value={rates[category]}
-                      />
-                      <b>%</b>
-                    </span>
-                  </label>
-                </div>
+                </label>
               ))}
             </div>
             <p className="sub-account-rate-hint">
-              {t('100% 为原始消耗金额；设置后，“查看消耗”中的分类及模型金额会按此比例计算。')}
+              {t('100% 为原始消耗金额；结算金额会按此比例计算。')}
             </p>
-            <section className="sub-account-settlement-history">
-              <h3>{t('结算记录')}</h3>
-              {settlementRecords.length > 0 ? (
-                <div className="table-wrap sub-account-settlement-history-table-wrap">
-                  <table className="sub-account-settlement-history-table">
-                    <thead>
-                      <tr>
-                        <th>{t('结算时间')}</th>
-                        <th>{t('渠道分类')}</th>
-                        <th>{t('消耗额度')}</th>
-                        <th>{t('结算汇率')}</th>
-                        <th>{t('结算金额')}</th>
-                        <th>{t('结算后累计')}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {settlementRecords.map((record) => {
-                        return (
-                          <tr key={record.id}>
-                            <td>{formatBeijingDateTime(record.createdAt, language)}</td>
-                            <td>{categoryLabel(record.category, language)}</td>
-                            <td>${record.consumptionAmount}</td>
-                            <td>{record.ratePercent}%</td>
-                            <td className={Number(record.settlementAmount) < 0 ? 'negative' : 'positive'}>
-                              ${record.settlementAmount}
-                            </td>
-                            <td>${record.settledAmount}</td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <p className="sub-account-settlement-history-empty">{t('暂无结算记录')}</p>
-              )}
-            </section>
             {error && <p className="account-dialog-error" role="alert">{error}</p>}
             <div className="account-dialog-actions">
               <button className="ghost-button" disabled={saving} onClick={onClose} type="button">{t('取消')}</button>
-              <button className="primary-button compact" disabled={saving} type="submit">
+              <button className="primary-button compact" disabled={saving || !loaded} type="submit">
                 {saving && <Loader2 className="spin" size={16} />}
                 {t(saving ? '保存中...' : '保存汇率')}
               </button>
@@ -6660,24 +7328,108 @@ function DeleteSubAccountDialog({
   );
 }
 
+function BatchSubAccountsDialog({ accounts, action, onClose, onSuccess }: {
+  accounts: SubAccount[];
+  action: 'sync' | 'delete';
+  onClose: () => void;
+  onSuccess: (id: number, updated?: SubAccount) => void;
+}) {
+  const { t } = useLanguage();
+  const [running, setRunning] = useState(false);
+  const [finished, setFinished] = useState(false);
+  const [results, setResults] = useState<Array<{ id: number; text: string; ok: boolean }>>([]);
+  const started = useRef(false);
+  async function run() {
+    if (started.current) return;
+    started.current = true;
+    setRunning(true);
+    for (const account of accounts) {
+      try {
+        const updated = await api<SubAccount>(action === 'sync'
+          ? `/api/sub-accounts/${account.id}/mapping/sync` : `/api/sub-accounts/${account.id}`,
+        { method: action === 'sync' ? 'POST' : 'DELETE' });
+        onSuccess(account.id, action === 'sync' ? updated : undefined);
+        setResults(current => [...current, { id: account.id, text: t(action === 'sync' ? '同步成功' : '删除成功'), ok: true }]);
+      } catch (error) {
+        setResults(current => [...current, { id: account.id, text: error instanceof Error ? error.message : t('操作失败'), ok: false }]);
+        if (error instanceof SessionExpiredError) break;
+      }
+    }
+    setRunning(false);
+    setFinished(true);
+  }
+  return <Dialog open disablePointerDismissal={running} onOpenChange={(open, details) => {
+    if (!open && running) { details.cancel(); return; }
+    if (!open) onClose();
+  }}>
+    <DialogContent className="account-dialog" showCloseButton={!running}>
+      <DialogHeader>
+        <DialogTitle>{t(action === 'sync' ? '批量同步' : '批量删除')}（{accounts.length}）</DialogTitle>
+        <DialogDescription>{t(action === 'sync'
+          ? '同步所选子账号到用户映射，重复 ID 将提示已在表中。'
+          : '将删除所选子账号，删除后无法恢复。有结算历史的账号将保留。')}</DialogDescription>
+      </DialogHeader>
+      <div className="batch-sub-account-results">
+        {accounts.map(account => {
+          const result = results.find(item => item.id === account.id);
+          return <div key={account.id}>
+            <span>{subAccountUpstreamUsername(account)} · ID {account.id}</span>
+            <span className={result && !result.ok ? 'batch-sub-account-error' : undefined}>
+              {result?.text || t(finished ? '未执行' : '待处理')}
+            </span>
+          </div>;
+        })}
+      </div>
+      {(running || finished) && <p>{t('处理进度')}：{results.length} / {accounts.length} · {t('成功')} {results.filter(item => item.ok).length}</p>}
+      <div className="account-dialog-actions">
+        <button className="ghost-button" type="button" disabled={running} onClick={onClose}>{t(finished ? '关闭' : '取消')}</button>
+        {!finished && <button className="primary-button" type="button" disabled={running} onClick={() => void run()}>
+          {running && <Loader2 size={16} className="spin" />}{t(running ? '处理中...' : action === 'sync' ? '开始同步' : '确认删除')}
+        </button>}
+      </div>
+    </DialogContent>
+  </Dialog>;
+}
+
 function SubAccountsView() {
   const { language, t } = useLanguage();
   const [items, setItems] = useState<SubAccount[]>([]);
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
-  const [usageAccount, setUsageAccount] = useState<SubAccount | null>(null);
   const [settlementAccount, setSettlementAccount] = useState<SubAccount | null>(null);
   const [rateAccount, setRateAccount] = useState<SubAccount | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState<SubAccount | null>(null);
   const [deletingAccount, setDeletingAccount] = useState<SubAccount | null>(null);
+  const [syncingId, setSyncingId] = useState<number | null>(null);
+  const [syncEnabled, setSyncEnabled] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  const [batch, setBatch] = useState<{ action: 'sync' | 'delete'; accounts: SubAccount[] } | null>(null);
+  const selectedAccounts = items.filter(item => selectedIds.includes(item.id));
+
+  async function syncMapping(account: SubAccount) {
+    if (syncingId !== null) return;
+    setSyncingId(account.id);
+    setNotice(null);
+    try {
+      const updated = await api<SubAccount>(`/api/sub-accounts/${account.id}/mapping/sync`, { method: 'POST' });
+      setItems(current => current.map(item => item.id === account.id ? updated : item));
+      setNotice({ type: 'ok', text: t('已同步到用户映射，已有映射信息已保留') });
+    } catch (error) {
+      setNotice({ type: 'warn', text: error instanceof Error ? error.message : t('同步用户映射失败') });
+    } finally {
+      setSyncingId(null);
+    }
+  }
 
   const load = useCallback(async (fresh = false) => {
     setLoading(true);
     setNotice(null);
     try {
-      const data = await api<{ items: SubAccount[] }>('/api/sub-accounts', { fresh });
+      const data = await api<{ items: SubAccount[]; sync_enabled: boolean }>('/api/sub-accounts', { fresh });
       setItems(data.items || []);
+      setSyncEnabled(data.sync_enabled === true);
+      setSelectedIds(current => current.filter(id => (data.items || []).some(item => item.id === id)));
     } catch (error) {
       setNotice({
         type: 'warn',
@@ -6697,7 +7449,7 @@ function SubAccountsView() {
     await load(true);
     setNotice({
       type: 'ok',
-      text: t('子账号创建成功；需由超级管理员创建并启用映射后才能登录。'),
+      text: t('子账号创建成功，可使用 GYS 用户名和密码登录本站。'),
     });
   }
 
@@ -6723,9 +7475,17 @@ function SubAccountsView() {
       <PageHeading
         icon={Users}
         title={t('子账号管理')}
-        subtitle={t('管理子账号及其平台模型消耗。')}
+        subtitle={t('管理子账号、结算及分类汇率。')}
         action={
           <div className="action-row">
+            {syncEnabled && <button className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
+              onClick={() => setBatch({ action: 'sync', accounts: selectedAccounts })}>
+              <RefreshCcw size={17} />{t('批量同步')}（{selectedAccounts.length}）
+            </button>}
+            <button className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
+              onClick={() => setBatch({ action: 'delete', accounts: selectedAccounts })}>
+              <Trash2 size={17} />{t('批量删除')}（{selectedAccounts.length}）
+            </button>
             <button className="ghost-button compact" onClick={() => load(true)} type="button">
               <RefreshCcw size={17} />
               {t('刷新')}
@@ -6749,9 +7509,12 @@ function SubAccountsView() {
             <table className="sub-accounts-table">
               <thead>
                 <tr>
+                  <th><input type="checkbox" aria-label={t('全选')} checked={items.length > 0 && selectedAccounts.length === items.length}
+                    ref={node => { if (node) node.indeterminate = selectedAccounts.length > 0 && selectedAccounts.length < items.length; }}
+                    onChange={event => setSelectedIds(event.target.checked ? items.map(item => item.id) : [])} /></th>
                   <th>ID</th>
                   <th>{t('本站用户名')}</th>
-                  <th>{t('GYS用户名')}</th>
+                  {syncEnabled && <th>{t('GYS用户名')}</th>}
                   <th>{t('显示名')}</th>
                   <th>{t('渠道数')}</th>
                   <th>{t('已用额度')}</th>
@@ -6766,10 +7529,12 @@ function SubAccountsView() {
                   const accountName = item.display_name || publicUsername || upstreamUsername;
                   return (
                   <tr key={item.id}>
+                    <td><input type="checkbox" aria-label={`${t('选择')} ${accountName}`} checked={selectedIds.includes(item.id)}
+                      onChange={event => setSelectedIds(current => event.target.checked ? [...new Set([...current, item.id])] : current.filter(id => id !== item.id))} /></td>
                     <td>{item.id}</td>
                     <td>{publicUsername || <Badge>{t('未映射')}</Badge>}</td>
-                    <td>{upstreamUsername || '-'}</td>
-                    <td>{item.display_name || '-'}</td>
+                    {syncEnabled && <td>{upstreamUsername || '-'}</td>}
+                    <td>{item.mapping_display_name || item.display_name || '-'}</td>
                     <td>{item.channel_count || 0}</td>
                     <td>{formatQuota(item.used_quota)}</td>
                     <td>
@@ -6777,9 +7542,10 @@ function SubAccountsView() {
                     </td>
                     <td>
                       <div className="sub-account-row-actions">
-                        <button aria-label={t('查看 {{name}} 的消耗', { name: accountName })} onClick={() => setUsageAccount(item)} type="button">
-                          <BarChart3 size={14} />{t('查看消耗')}
-                        </button>
+                        {syncEnabled && <button disabled={syncingId !== null} onClick={() => void syncMapping(item)} type="button">
+                          <RefreshCcw className={syncingId === item.id ? 'spin' : undefined} size={14} />
+                          {t(syncingId === item.id ? '同步中...' : '同步')}
+                        </button>}
                         <button aria-label={t('为 {{name}} 结算', { name: accountName })} onClick={() => setSettlementAccount(item)} type="button">
                           <CheckCircle2 size={14} />{t('结算')}
                         </button>
@@ -6804,7 +7570,11 @@ function SubAccountsView() {
           <EmptyState title={t('暂无子账号')} description={t('点击“新增子账号”创建第一个子账号。')} />
         )}
       </div>
-      {usageAccount && <SubAccountUsageDialog key={usageAccount.id} account={usageAccount} onClose={() => setUsageAccount(null)} />}
+      {batch && <BatchSubAccountsDialog accounts={batch.accounts} action={batch.action} onClose={() => setBatch(null)}
+        onSuccess={(id, updated) => {
+          setItems(current => updated ? current.map(item => item.id === id ? updated : item) : current.filter(item => item.id !== id));
+          setSelectedIds(current => current.filter(value => value !== id));
+        }} />}
       {settlementAccount && (
         <SubAccountSettlementDialog
           key={settlementAccount.id}
@@ -6855,7 +7625,7 @@ function SupplierApplication() {
   const [authLoading, setAuthLoading] = useState(true);
   const [activeView, setActiveView] = useState<ViewKey>('dashboard');
   const [isLoggingOut, setIsLoggingOut] = useState(false);
-  const [authError, setAuthError] = useState(false);
+  const [authError, setAuthError] = useState<string | null>(null);
   const [authAttempt, setAuthAttempt] = useState(0);
   const [profileVerified, setProfileVerified] = useState(false);
   const authVersionRef = useRef(0);
@@ -6867,7 +7637,7 @@ function SupplierApplication() {
     apiCache.clear();
     pendingApiRequests.clear();
     authRedirectPending = false;
-    setAuthError(false);
+    setAuthError(null);
     setProfileVerified(false);
   }
 
@@ -6882,7 +7652,7 @@ function SupplierApplication() {
     const controller = new AbortController();
     const version = authVersionRef.current;
     const isCurrent = () => !controller.signal.aborted && version === authVersionRef.current;
-    setAuthError(false);
+    setAuthError(null);
     setProfileVerified(false);
     setAuthLoading(true);
     const cachedUser = readCachedUser();
@@ -6903,7 +7673,11 @@ function SupplierApplication() {
         if (error instanceof SessionExpiredError) {
           clearCachedUser();
         } else {
-          setAuthError(true);
+          setAuthError(error instanceof ApiRequestError
+            ? `${error.message} (HTTP ${error.status})${error.requestId ? ` · ${error.requestId}` : ''}`
+            : error instanceof Error && error.message !== 'Invalid profile response'
+              ? error.message
+              : t('原 GYS 数据服务返回了无效账号信息'));
         }
       })
       .finally(() => {
@@ -6953,6 +7727,7 @@ function SupplierApplication() {
         <main className="loading-screen" role="alert">
           <AlertTriangle size={30} />
           <span>{t('暂时无法验证登录状态，请重试')}</span>
+          <p className="auth-error-details">{t(authError)}</p>
           <button className="primary-button compact" type="button" onClick={() => setAuthAttempt((value) => value + 1)}>
             <RefreshCcw size={16} />{t('重试')}
           </button>
@@ -6988,6 +7763,7 @@ function SupplierApplication() {
         <div className="session-retry-notice" role="alert">
           <AlertTriangle size={18} />
           <span>{t('暂时无法验证登录状态，请重试')}</span>
+          <span className="auth-error-details">{t(authError)}</span>
           <button className="ghost-button compact" type="button" onClick={() => setAuthAttempt((value) => value + 1)}>
             <RefreshCcw size={15} />{t('重试')}
           </button>

@@ -39,6 +39,7 @@ services:
       DATABASE_URL: postgresql://gys:${POSTGRES_PASSWORD}@gys-postgres:5432/gys
       GYS_PUBLIC_ORIGIN: ${GYS_PUBLIC_ORIGIN:-https://gys.oljvxj.xyz}
       SUPER_ADMIN_INITIAL_PASSWORD: ${SUPER_ADMIN_INITIAL_PASSWORD:-}
+      SESSION_COOKIE_ENCRYPTION_KEY: ${SESSION_COOKIE_ENCRYPTION_KEY:?SESSION_COOKIE_ENCRYPTION_KEY is required}
       TZ: Asia/Shanghai
     expose:
       - "8000"

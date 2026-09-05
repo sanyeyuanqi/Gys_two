@@ -7,7 +7,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 
-from backend.main import decimal_text, store
+from backend.main import DAY_MS, decimal_text, protect_session_cookies, store
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -39,6 +39,7 @@ def settlement_amount(record: dict[str, Any]) -> str:
 
 
 def migrate() -> None:
+    migration_started_at = int(time.time() * 1000)
     source_path = Path(
         os.environ.get("GYS_LEGACY_SQLITE_PATH", str(DEFAULT_SQLITE_PATH))
     ).resolve()
@@ -70,18 +71,35 @@ def migrate() -> None:
                 print("SQLite 数据已经迁移，无需重复执行。")
                 return
             for row in sessions:
+                try:
+                    created_at = int(row.get("created_at", 0))
+                    expires_at = int(row.get("expires_at", 0))
+                    authenticated = int(row.get("authenticated", 0))
+                    cookie_updated_at = int(row.get("cookie_updated_at") or created_at)
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    not authenticated
+                    or str(row.get("auth_source", "upstream")) != "upstream"
+                    or expires_at <= migration_started_at
+                    or created_at + 30 * DAY_MS <= migration_started_at
+                ):
+                    continue
                 store.connection.execute(
                     """
                     INSERT INTO upstream_sessions
                         (token_hash, upstream_user_id, username, display_name, role,
-                         cookies, authenticated, created_at, expires_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         cookies, cookie_updated_at, auth_source, authenticated,
+                         created_at, expires_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, 'upstream', ?, ?, ?)
                     ON CONFLICT(token_hash) DO UPDATE SET
                         upstream_user_id = excluded.upstream_user_id,
                         username = excluded.username,
                         display_name = excluded.display_name,
                         role = excluded.role,
                         cookies = excluded.cookies,
+                        cookie_updated_at = excluded.cookie_updated_at,
+                        auth_source = excluded.auth_source,
                         authenticated = excluded.authenticated,
                         created_at = excluded.created_at,
                         expires_at = excluded.expires_at
@@ -92,10 +110,11 @@ def migrate() -> None:
                         row.get("username"),
                         row.get("display_name"),
                         row.get("role"),
-                        row.get("cookies", "[]"),
-                        row.get("authenticated", 0),
-                        row.get("created_at", 0),
-                        row.get("expires_at", 0),
+                        protect_session_cookies(str(row.get("cookies", "[]"))),
+                        cookie_updated_at,
+                        authenticated,
+                        created_at,
+                        expires_at,
                     ),
                 )
                 migrated["upstream_sessions"] += 1
@@ -214,6 +233,10 @@ def migrate() -> None:
     print("SQLite 数据已迁移到 PostgreSQL：")
     for table, count in migrated.items():
         print(f"- {table}: {count}")
+    print(
+        "旧 SQLite 文件仍可能包含明文会话 Cookie；确认迁移结果后，"
+        "请将其删除或转移到加密备份。"
+    )
 
 
 if __name__ == "__main__":
