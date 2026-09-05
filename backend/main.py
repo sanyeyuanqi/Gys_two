@@ -2850,18 +2850,18 @@ async def read_body(request: Request) -> dict[str, Any]:
 
 def validate_profile(profile: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(profile, dict):
-        raise BackendError(502, "原 GYS 数据服务返回了无效账号信息")
+        raise BackendError(502, "服务器暂不可用，请稍后重试")
     try:
         user_id = int(profile.get("user_id", profile.get("id")))
     except (TypeError, ValueError) as error:
-        raise BackendError(502, "原 GYS 数据服务返回了无效账号信息") from error
+        raise BackendError(502, "服务器暂不可用，请稍后重试") from error
     username = profile.get("username")
     username = username.strip() if isinstance(username, str) else ""
     role = profile.get("role") if isinstance(profile.get("role"), str) else ""
     display_name = profile.get("display_name")
     display_name = display_name.strip() if isinstance(display_name, str) else username
     if user_id <= 0 or not username or role not in {"admin", "supplier", "sub"}:
-        raise BackendError(502, "原 GYS 数据服务返回了无效账号信息")
+        raise BackendError(502, "服务器暂不可用，请稍后重试")
     return {
         "id": user_id,
         "user_id": user_id,
@@ -3197,7 +3197,7 @@ def unwrap(response: httpx.Response, payload: Any) -> Any:
     if not isinstance(payload, dict):
         if response.is_success:
             return payload
-        raise BackendError(response.status_code, "原 GYS 数据服务请求失败")
+        raise BackendError(response.status_code, "服务器暂不可用，请稍后重试")
     raw_code = payload.get("code")
     try:
         code = int(raw_code) if raw_code is not None else 0
@@ -3212,7 +3212,7 @@ def unwrap(response: httpx.Response, payload: Any) -> Any:
         message = payload.get("message")
         raise BackendError(
             status,
-            message if isinstance(message, str) and message else "原 GYS 数据服务请求失败",
+            message if isinstance(message, str) and message else "服务器暂不可用，请稍后重试",
             payload.get("request_id") if isinstance(payload.get("request_id"), str) else None,
         )
     return payload.get("data", payload)
@@ -3271,11 +3271,11 @@ async def upstream_raw(
                     expected_cookie_updated_at,
                 )
     except httpx.RequestError as error:
-        raise BackendError(502, "原 GYS 数据服务暂时不可用，请稍后重试") from error
+        raise BackendError(502, "服务器暂不可用，请稍后重试") from error
     try:
         payload = response.json()
     except ValueError as error:
-        raise BackendError(502, "原 GYS 数据服务返回了无效响应") from error
+        raise BackendError(502, "服务器暂不可用，请稍后重试") from error
     return response, payload
 
 
@@ -3622,11 +3622,11 @@ async def forward_open_api(open_path: str, request: Request) -> JSONResponse:
                     json=body if body is not None else None,
                 )
         except httpx.RequestError as error:
-            raise BackendError(502, "原 GYS 数据服务暂时不可用，请稍后重试") from error
+            raise BackendError(502, "服务器暂不可用，请稍后重试") from error
         try:
             payload = response.json()
         except ValueError as error:
-            raise BackendError(502, "原 GYS 数据服务返回了无效响应") from error
+            raise BackendError(502, "服务器暂不可用，请稍后重试") from error
         return success_response(request, request_id, sanitize_data(unwrap(response, payload)))
     except Exception as error:  # The envelope is part of the public API contract.
         return error_response(request, request_id, error)

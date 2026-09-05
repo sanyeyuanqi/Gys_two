@@ -40,10 +40,10 @@ export async function proxyFastApi(request: Request) {
   try {
     backendOrigin = new URL(configured);
   } catch {
-    return errorResponse('FastAPI 后端地址配置无效');
+    return errorResponse('服务器暂不可用，请稍后重试');
   }
   if (!['http:', 'https:'].includes(backendOrigin.protocol) || backendOrigin.pathname !== '/') {
-    return errorResponse('FastAPI 后端地址配置无效');
+    return errorResponse('服务器暂不可用，请稍后重试');
   }
 
   const source = new URL(request.url);
@@ -76,7 +76,7 @@ export async function proxyFastApi(request: Request) {
       signal: AbortSignal.any([request.signal, AbortSignal.timeout(65_000)]),
     });
   } catch {
-    return errorResponse('FastAPI 后端未启动或暂时不可用');
+    return errorResponse('服务器暂不可用，请稍后重试');
   }
 
   const responseHeaders = new Headers({

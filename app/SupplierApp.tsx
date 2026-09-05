@@ -55,13 +55,6 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import {
-  Popover,
-  PopoverContent,
-  PopoverDescription,
-  PopoverTitle,
-  PopoverTrigger,
-} from '@/components/ui/popover';
-import {
   Select,
   SelectContent,
   SelectItem,
@@ -863,6 +856,7 @@ const englishTranslations: Record<string, string> = {
   '子账号 ID 必须为正整数': 'Sub-account ID must be a positive integer',
   '更新时间': 'Updated At',
   '数据同步时间': 'Data synced at',
+  '服务器暂不可用，请稍后重试': 'The server is temporarily unavailable. Please try again later.',
   '本站用户名': 'Local username',
   '本站显示名': 'Local display name',
   '请输入本站显示名': 'Enter a local display name',
@@ -1251,7 +1245,7 @@ function navigationItemsForUser(user: UserProfile) {
 }
 
 function defaultViewForUser(user: UserProfile): ViewKey {
-  return isSuperAdmin(user) ? 'user-mappings' : 'dashboard';
+  return isSuperAdmin(user) ? 'user-mappings' : 'upload';
 }
 
 const openApiErrors = [
@@ -1315,6 +1309,7 @@ function normalizeApiCode(code: ApiEnvelope<unknown>['code']) {
 
 function getApiErrorMessage(payload: ApiEnvelope<unknown>, status: number, code?: number) {
   const message = typeof payload.message === 'string' ? payload.message.trim() : '';
+  if (/原\s*GYS|FastAPI/i.test(message)) return '服务器暂不可用，请稍后重试';
   if (message) return message;
   if (code && apiCodeMessages[code]) return apiCodeMessages[code];
   if (status === 401) return '登录状态已失效，请重新登录';
@@ -1479,7 +1474,6 @@ function AppDateRangePicker({
   startPlaceholder,
   endPlaceholder,
   clearable = false,
-  align = 'end',
 }: {
   value: AppDateRange;
   onChange: (nextRange: AppDateRange) => void;
@@ -1521,8 +1515,8 @@ function AppDateRangePicker({
   }
 
   return (
-    <Popover open={open} onOpenChange={changeOpen}>
-      <PopoverTrigger
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <DialogTrigger
         aria-label={`${t('开始日期')} ${startLabel}，${t('结束日期')} ${endLabel}`}
         className="app-date-range"
         type="button"
@@ -1542,11 +1536,11 @@ function AppDateRangePicker({
           )}
         </span>
         <ChevronDown aria-hidden="true" className="app-date-range-chevron" size={14} />
-      </PopoverTrigger>
-      <PopoverContent align={align} className="app-date-picker-popover" sideOffset={8}>
+      </DialogTrigger>
+      <DialogContent className="app-date-picker-dialog" overlayProps={{ forceRender: true, className: 'app-date-picker-overlay' }}>
         <div className="app-date-picker-header">
-          <PopoverTitle>{t('选择日期范围')}</PopoverTitle>
-          <PopoverDescription>{t('选择开始和结束日期')}</PopoverDescription>
+          <DialogTitle>{t('选择日期范围')}</DialogTitle>
+          <DialogDescription>{t('选择开始和结束日期')}</DialogDescription>
         </div>
         <Calendar
           className="app-range-calendar"
@@ -1581,8 +1575,8 @@ function AppDateRangePicker({
             </ActionButton>
           </div>
         </div>
-      </PopoverContent>
-    </Popover>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1596,7 +1590,7 @@ function buildUploadTagPreview(userId: number, category: string, timestamp: numb
 
 function viewFromPath(pathname: string): ViewKey {
   const key = pathname.replace(/^\/+/, '').split('/')[0] as ViewKey;
-  return navItems.some((item) => item.key === key) ? key : 'dashboard';
+  return navItems.some((item) => item.key === key) ? key : 'upload';
 }
 
 function normalizeUserProfile(value: unknown): UserProfile | null {
@@ -2275,9 +2269,6 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
             <article className="announcement-featured-article">
               <header>
                 <h2>{activeAnnouncementCopy?.title}</h2>
-                <time dateTime={new Date(activeAnnouncement.publishedAt || activeAnnouncement.createdAt).toISOString()}>
-                  {formatBeijingDateTime(activeAnnouncement.publishedAt || activeAnnouncement.createdAt, language)}
-                </time>
               </header>
               <p>{activeAnnouncementCopy?.content}</p>
             </article>
@@ -2303,9 +2294,6 @@ function AnnouncementCenter({ userKey }: { userKey: string }) {
                   <article className="announcement-dialog-item" key={item.id}>
                     <div className="announcement-dialog-item-heading">
                       <h3>{itemCopy.title}</h3>
-                      <time dateTime={new Date(item.publishedAt || item.createdAt).toISOString()}>
-                        {formatBeijingDateTime(item.publishedAt || item.createdAt, language)}
-                      </time>
                     </div>
                     <p className="announcement-dialog-item-content">{itemCopy.content}</p>
                   </article>
@@ -5871,46 +5859,118 @@ function SettlementHistoryView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
+  const [mobile, setMobile] = useState(false);
+  const [pullDistance, setPullDistance] = useState(0);
+  const sectionRef = useRef<HTMLElement>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const pendingRef = useRef(true);
+  const refresh = useCallback(() => {
+    if (pendingRef.current) return;
+    pendingRef.current = true;
+    setLoading(true);
+    setPage(1);
+    setAttempt(value => value + 1);
+  }, []);
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 768px)');
+    const update = () => { setMobile(media.matches); setPage(1); };
+    update();
+    media.addEventListener('change', update);
+    return () => media.removeEventListener('change', update);
+  }, []);
   useEffect(() => {
     const controller = new AbortController();
+    pendingRef.current = true;
     setLoading(true);
     setError('');
     api<{ items: SettlementTransaction[]; hasMore: boolean }>(`/api/settlement-history?page=${page}`, {
       fresh: true, signal: controller.signal,
     }).then(data => {
       if (!controller.signal.aborted) {
-        setTransactions(data.items);
+        setTransactions(current => mobile && page > 1
+          ? Array.from(new Map([...current, ...data.items].map(item => [item.id, item])).values()) : data.items);
         setHasMore(data.hasMore);
       }
     }).catch(failure => {
       if (!controller.signal.aborted) setError(failure instanceof Error ? failure.message : t('加载结算数据失败'));
     }).finally(() => {
-      if (!controller.signal.aborted) setLoading(false);
+      if (!controller.signal.aborted) { pendingRef.current = false; setLoading(false); }
     });
     return () => controller.abort();
-  }, [page, attempt, t]);
+  }, [page, attempt, mobile, t]);
+  useEffect(() => {
+    if (!mobile || loading || error || !hasMore || !sentinelRef.current) return;
+    const observer = new IntersectionObserver(entries => {
+      if (entries.some(entry => entry.isIntersecting) && !pendingRef.current) {
+        pendingRef.current = true;
+        setLoading(true);
+        setPage(value => value + 1);
+      }
+    }, { rootMargin: '0px 0px 120px 0px' });
+    observer.observe(sentinelRef.current);
+    return () => observer.disconnect();
+  }, [mobile, loading, error, hasMore]);
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!mobile || !section) return;
+    let start: { x: number; y: number } | null = null;
+    let distance = 0;
+    const reset = () => { start = null; distance = 0; setPullDistance(0); };
+    const begin = (event: TouchEvent) => {
+      reset();
+      if (pendingRef.current || event.touches.length !== 1 || window.scrollY > 0) return;
+      let target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('button, input, textarea, select, [role="dialog"]')) return;
+      while (target) { if (target.scrollTop > 0) return; target = target.parentElement; }
+      start = { x: event.touches[0].clientX, y: event.touches[0].clientY };
+    };
+    const move = (event: TouchEvent) => {
+      if (!start) return;
+      if (event.touches.length !== 1) { reset(); return; }
+      const dx = event.touches[0].clientX - start.x;
+      const dy = event.touches[0].clientY - start.y;
+      if (Math.abs(dx) > Math.abs(dy) || dy < 0) { reset(); return; }
+      distance = Math.min(96, dy * 0.5);
+      if (dy > 8 && event.cancelable) event.preventDefault();
+      setPullDistance(distance);
+    };
+    const end = () => { const ready = distance >= 64; reset(); if (ready) refresh(); };
+    section.addEventListener('touchstart', begin, { passive: true });
+    section.addEventListener('touchmove', move, { passive: false });
+    section.addEventListener('touchend', end);
+    section.addEventListener('touchcancel', reset);
+    return () => {
+      section.removeEventListener('touchstart', begin); section.removeEventListener('touchmove', move);
+      section.removeEventListener('touchend', end); section.removeEventListener('touchcancel', reset);
+    };
+  }, [mobile, refresh]);
   return (
-    <section className="settlement-history-page" aria-busy={loading}>
+    <section ref={sectionRef} className="settlement-history-page" aria-busy={loading}>
+      {mobile && (pullDistance > 0 || (loading && page === 1 && transactions.length > 0)) &&
+        <div className="mobile-pull-refresh" role="status" style={{ minHeight: Math.max(36, pullDistance) }}>
+          <RefreshCcw size={16} className={loading ? 'spin' : undefined} />
+          {t(loading ? '正在刷新...' : pullDistance >= 64 ? '松开刷新' : '下拉刷新')}
+        </div>}
       <div className="daily-stats-toolbar">
-        <div><h1>{t('结算历史')}</h1><p>{t('查看当前账户的结算交易与分类明细。')}</p></div>
-        <ActionButton className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>
+        <h1 className="sr-only">{t('结算历史')}</h1>
+        <ActionButton className="ghost-button compact" type="button" disabled={loading} onClick={refresh}>
           <RefreshCcw size={15} className={loading ? 'spin' : undefined} />{t('刷新')}
         </ActionButton>
       </div>
-      {loading ? (
-        <div className="user-usage-state" role="status"><Loader2 className="spin" size={24} />{t('正在加载结算数据')}</div>
-      ) : error ? (
-        <div className="user-usage-state error" role="alert"><AlertTriangle size={24} /><p>{error}</p>
-          <ActionButton className="ghost-button compact" type="button" onClick={() => setAttempt(value => value + 1)}>{t('重试')}</ActionButton>
-        </div>
-      ) : transactions.length ? <SettlementTransactionList transactions={transactions} /> : (
-        <div className="user-usage-state"><Database size={26} /><span>{t('暂无结算记录')}</span></div>
-      )}
-      <div className="settlement-history-pagination">
+      {transactions.length > 0 && (!loading || mobile) && <SettlementTransactionList transactions={transactions} />}
+      {loading && (!mobile || !transactions.length) && <div className="user-usage-state" role="status"><Loader2 className="spin" size={24} />{t('正在加载结算数据')}</div>}
+      {error && <div className="user-usage-state error" role="alert"><AlertTriangle size={24} /><p>{error}</p>
+        <ActionButton className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>{t('重试')}</ActionButton>
+      </div>}
+      {!loading && !error && !transactions.length && <div className="user-usage-state"><Database size={26} /><span>{t('暂无结算记录')}</span></div>}
+      {mobile ? <div ref={sentinelRef} className="mobile-load-more" role="status">
+        {loading && page > 1 ? <><Loader2 className="spin" size={16} />{t('加载更多...')}</>
+          : !error && transactions.length > 0 ? t(hasMore ? '继续下滑加载更多' : '没有更多了') : null}
+      </div> : <div className="settlement-history-pagination">
         <ActionButton className="ghost-button compact" type="button" disabled={loading || page <= 1} onClick={() => setPage(value => value - 1)}>{t('上一页')}</ActionButton>
         <span>{t('第 {{page}} 页', { page })}</span>
         <ActionButton className="ghost-button compact" type="button" disabled={loading || !!error || !hasMore} onClick={() => setPage(value => value + 1)}>{t('下一页')}</ActionButton>
-      </div>
+      </div>}
     </section>
   );
 }
@@ -7355,12 +7415,8 @@ function SubAccountsView() {
 
   return (
     <section className="sub-accounts-page">
-      <PageHeading
-        icon={Users}
-        title={t('子账号管理')}
-        subtitle={t('管理子账号及分类汇率。')}
-        action={
-          <div className="action-row">
+      <h1 className="sr-only">{t('子账号管理')}</h1>
+          <div className="sub-accounts-toolbar">
             {syncEnabled && <ActionButton className="ghost-button compact" disabled={loading || syncingId !== null || !selectedAccounts.length} type="button"
               onClick={() => setBatch({ action: 'sync', accounts: selectedAccounts })}>
               <RefreshCcw size={17} />{t('批量同步')}（{selectedAccounts.length}）
@@ -7378,8 +7434,6 @@ function SubAccountsView() {
               {t('新增子账号')}
             </ActionButton>
           </div>
-        }
-      />
       <NoticeBanner notice={notice} />
       <div className="panel sub-accounts-panel">
         {loading ? (
@@ -7571,7 +7625,7 @@ function SupplierApplication() {
             ? `${error.message} (HTTP ${error.status})${error.requestId ? ` · ${error.requestId}` : ''}`
             : error instanceof Error && error.message !== 'Invalid profile response'
               ? error.message
-              : t('原 GYS 数据服务返回了无效账号信息'));
+              : t('服务器暂不可用，请稍后重试'));
         }
       })
       .finally(() => {
