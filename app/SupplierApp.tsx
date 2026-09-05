@@ -448,6 +448,10 @@ const englishTranslations: Record<string, string> = {
   '渠道记录': 'Channel Records',
   '请求记录': 'Requests',
   '全部分类': 'All Categories',
+  '选择分类': 'Select Category',
+  '选择状态': 'Select Status',
+  '选择标签': 'Select Tag',
+  '请选择一个筛选项': 'Choose a filter option',
   '渠道分类模型消耗': 'Model Usage by Channel Category',
   '渠道分类总消耗': 'Total Usage by Channel Category',
   '总消耗': 'Total Usage',
@@ -3261,6 +3265,8 @@ function MyChannelsView() {
   const [category, setCategory] = useState('');
   const [status, setStatus] = useState('');
   const [tag, setTag] = useState('');
+  const [mobileFilterKind, setMobileFilterKind] = useState<'category' | 'status' | 'tag'>('category');
+  const [mobileFilterOpen, setMobileFilterOpen] = useState(false);
   const [keyword, setKeyword] = useState('');
   const [loading, setLoading] = useState(true);
   const [notice, setNotice] = useState<Notice | null>(null);
@@ -3387,6 +3393,15 @@ function MyChannelsView() {
     return () => window.clearTimeout(timeout);
   }, [testToast]);
 
+  useEffect(() => {
+    const mobileViewport = window.matchMedia('(max-width: 760px)');
+    const closeMobileFilterOnWideScreen = (event: MediaQueryListEvent) => {
+      if (!event.matches) setMobileFilterOpen(false);
+    };
+    mobileViewport.addEventListener('change', closeMobileFilterOnWideScreen);
+    return () => mobileViewport.removeEventListener('change', closeMobileFilterOnWideScreen);
+  }, []);
+
   const pageCount = Math.max(1, Math.ceil((viewMode === 'group' ? groupTotal : listTotal) / pageSize));
   const currentPage = viewMode === 'group' ? groupPage : listPage;
   const paginationItems = useMemo(
@@ -3398,6 +3413,32 @@ function MyChannelsView() {
     && new Set(testResults.map((result) => result.instance_id)).size > 1;
   const channelConfirmationBusy = !!channelConfirmation
     && rowAction?.id === channelConfirmation.item.id;
+  const mobileFilterTitle = mobileFilterKind === 'category'
+    ? t('选择分类')
+    : mobileFilterKind === 'status'
+      ? t('选择状态')
+      : t('选择标签');
+  const mobileFilterValue = mobileFilterKind === 'category'
+    ? category
+    : mobileFilterKind === 'status'
+      ? status
+      : tag;
+  const mobileFilterOptions = mobileFilterKind === 'category'
+    ? [
+        { value: '', label: t('全部分类') },
+        ...categoryOptions.map((item) => ({ value: item, label: categoryLabel(item, language) })),
+      ]
+    : mobileFilterKind === 'status'
+      ? [
+          { value: '', label: t('全部状态') },
+          { value: '1', label: t('启用') },
+          { value: '2', label: t('禁用') },
+          { value: '3', label: t('自动禁用') },
+        ]
+      : [
+          { value: '', label: t('全部标签') },
+          ...tags.map((item) => ({ value: item, label: item })),
+        ];
 
   function changeView(nextView: 'group' | 'list') {
     if (nextView === viewMode) return;
@@ -3409,6 +3450,37 @@ function MyChannelsView() {
     setDateRange({ from: nextRange.start, to: nextRange.end });
     setGroupPage(1);
     setListPage(1);
+  }
+
+  function changeCategoryFilter(value: string) {
+    setCategory(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
+    setGroupPage(1);
+    setListPage(1);
+    setExpandedTags([]);
+    setGroupDetails({});
+    setDetailLoading({});
+  }
+
+  function changeStatusFilter(value: string) {
+    setStatus(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
+    setListPage(1);
+  }
+
+  function changeTagFilter(value: string) {
+    setTag(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
+    setListPage(1);
+  }
+
+  function applyMobileFilter(value: string) {
+    if (mobileFilterKind === 'category') changeCategoryFilter(value);
+    else if (mobileFilterKind === 'status') changeStatusFilter(value);
+    else changeTagFilter(value);
+    setMobileFilterOpen(false);
+  }
+
+  function openMobileFilter(kind: 'category' | 'status' | 'tag') {
+    setMobileFilterKind(kind);
+    setMobileFilterOpen(true);
   }
 
   function changePage(nextPage: number) {
@@ -3735,16 +3807,20 @@ function MyChannelsView() {
           startPlaceholder={t('创建起')}
           value={{ start: dateRange.from, end: dateRange.to }}
         />
+        <button
+          aria-expanded={mobileFilterOpen && mobileFilterKind === 'category'}
+          aria-haspopup="dialog"
+          aria-label={t('选择分类')}
+          className="my-channel-mobile-filter-button"
+          onClick={() => openMobileFilter('category')}
+          type="button"
+        >
+          <span>{category ? categoryLabel(category, language) : t('全部分类')}</span>
+          <ChevronRight aria-hidden="true" size={14} />
+        </button>
         <Select
           value={category || ALL_CHANNEL_FILTER_VALUE}
-          onValueChange={(value) => {
-            setCategory(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
-            setGroupPage(1);
-            setListPage(1);
-            setExpandedTags([]);
-            setGroupDetails({});
-            setDetailLoading({});
-          }}
+          onValueChange={changeCategoryFilter}
         >
           <SelectTrigger aria-label={t('分类')} className="my-channel-filter-select">
             <SelectValue>{category ? categoryLabel(category, language) : t('全部分类')}</SelectValue>
@@ -3758,12 +3834,28 @@ function MyChannelsView() {
         </Select>
         {viewMode === 'list' && (
           <>
+            <button
+              aria-expanded={mobileFilterOpen && mobileFilterKind === 'status'}
+              aria-haspopup="dialog"
+              aria-label={t('选择状态')}
+              className="my-channel-mobile-filter-button"
+              onClick={() => openMobileFilter('status')}
+              type="button"
+            >
+              <span>
+                {status === '1'
+                  ? t('启用')
+                  : status === '2'
+                    ? t('禁用')
+                    : status === '3'
+                      ? t('自动禁用')
+                      : t('全部状态')}
+              </span>
+              <ChevronRight aria-hidden="true" size={14} />
+            </button>
             <Select
               value={status || ALL_CHANNEL_FILTER_VALUE}
-              onValueChange={(value) => {
-                setStatus(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
-                setListPage(1);
-              }}
+              onValueChange={changeStatusFilter}
             >
               <SelectTrigger aria-label={t('状态')} className="my-channel-filter-select">
                 <SelectValue>
@@ -3783,12 +3875,20 @@ function MyChannelsView() {
                 <SelectItem value="3">{t('自动禁用')}</SelectItem>
               </SelectContent>
             </Select>
+            <button
+              aria-expanded={mobileFilterOpen && mobileFilterKind === 'tag'}
+              aria-haspopup="dialog"
+              aria-label={t('选择标签')}
+              className="my-channel-mobile-filter-button"
+              onClick={() => openMobileFilter('tag')}
+              type="button"
+            >
+              <span>{tag || t('全部标签')}</span>
+              <ChevronRight aria-hidden="true" size={14} />
+            </button>
             <Select
               value={tag || ALL_CHANNEL_FILTER_VALUE}
-              onValueChange={(value) => {
-                setTag(value && value !== ALL_CHANNEL_FILTER_VALUE ? value : '');
-                setListPage(1);
-              }}
+              onValueChange={changeTagFilter}
             >
               <SelectTrigger aria-label={t('标签')} className="my-channel-filter-select my-channel-tag-filter-select">
                 <SelectValue>{tag || t('全部标签')}</SelectValue>
@@ -3819,6 +3919,40 @@ function MyChannelsView() {
           </>
         )}
       </div>
+
+      <Dialog
+        onOpenChange={setMobileFilterOpen}
+        open={mobileFilterOpen}
+      >
+        <DialogContent className="my-channel-mobile-filter-dialog" showCloseButton={false}>
+          <div className="my-channel-mobile-filter-dialog-header">
+            <DialogHeader>
+              <DialogTitle>{mobileFilterTitle}</DialogTitle>
+              <DialogDescription className="sr-only">{t('请选择一个筛选项')}</DialogDescription>
+            </DialogHeader>
+            <DialogClose aria-label={t('关闭')} className="my-channel-mobile-filter-dialog-close">
+              <X size={18} />
+            </DialogClose>
+          </div>
+          <div className="my-channel-mobile-filter-options">
+            {mobileFilterOptions.map((option) => {
+              const selected = option.value === mobileFilterValue;
+              return (
+                <button
+                  aria-pressed={selected}
+                  className={selected ? 'selected' : ''}
+                  key={option.value || ALL_CHANNEL_FILTER_VALUE}
+                  onClick={() => applyMobileFilter(option.value)}
+                  type="button"
+                >
+                  <span>{option.label}</span>
+                  {selected && <CheckCircle2 aria-hidden="true" size={18} />}
+                </button>
+              );
+            })}
+          </div>
+        </DialogContent>
+      </Dialog>
 
       <div className="my-channel-table-wrap">
         {loading ? (
