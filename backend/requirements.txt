@@ -1,5 +1,6 @@
 fastapi==0.116.1
 httpx==0.28.1
+openpyxl==3.1.5
 cryptography>=45,<46
 psycopg[binary]>=3.2,<4
 python-dotenv>=1,<2

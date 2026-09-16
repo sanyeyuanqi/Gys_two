@@ -84,6 +84,8 @@ export async function proxyFastApi(request: Request) {
     'content-type': response.headers.get('content-type') || 'application/json; charset=utf-8',
     'x-content-type-options': 'nosniff',
   });
+  const contentDisposition = response.headers.get('content-disposition');
+  if (contentDisposition) responseHeaders.set('content-disposition', contentDisposition);
   for (const value of setCookieValues(response)) responseHeaders.append('set-cookie', value);
   return new Response(response.body, {
     status: response.status,

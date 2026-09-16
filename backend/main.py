@@ -24,8 +24,10 @@ import psycopg
 from cryptography.fernet import Fernet, InvalidToken
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from psycopg.rows import dict_row
+
+from backend.settlement_export import build_settlement_workbook, settlement_export_filename
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -64,6 +66,9 @@ CHANNEL_USAGE_CATEGORIES = (
     "openrouter",
     "opencode",
 )
+CHANNEL_USAGE_CATEGORY_ALIASES = {
+    "awsb": "aws",
+}
 DEFAULT_CATEGORY_RATE_PERCENT = Decimal(0)
 PUBLIC_AUTH = {
     "/api/auth/login-captcha",
@@ -238,26 +243,65 @@ def channel_summary_integer(value: Any, field_name: str) -> int:
     return int(parsed)
 
 
+def canonical_channel_usage_category(value: Any) -> str:
+    category = value.strip().lower() if isinstance(value, str) else ""
+    return CHANNEL_USAGE_CATEGORY_ALIASES.get(category, category)
+
+
+def merge_channel_summary_rows(rows: list[DbRow]) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        category = canonical_channel_usage_category(row.get("category"))
+        if not category or category == CHANNEL_SUMMARY_TOTAL_CATEGORY:
+            continue
+        quota = Decimal(str(row["quota"]))
+        row_count = int(row["row_count"])
+        alive_rows = int(row["alive_rows"])
+        current = merged.get(category)
+        if current is None:
+            merged[category] = {
+                "category": category,
+                "quota": quota,
+                "row_count": row_count,
+                "alive_rows": alive_rows,
+            }
+            continue
+        with localcontext() as context:
+            context.prec = 64
+            current["quota"] += quota
+        current["row_count"] += row_count
+        current["alive_rows"] += alive_rows
+    return sorted(
+        merged.values(),
+        key=lambda row: (-row["quota"], row["category"]),
+    )
+
+
 def normalize_channel_summary(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or not isinstance(data.get("categories"), list):
         raise BackendError(502, "渠道汇总数据格式不正确")
     if len(data["categories"]) > 256:
         raise BackendError(502, "渠道汇总分类数量异常")
 
-    normalized_categories: list[dict[str, Any]] = []
-    seen_categories: set[str] = set()
+    normalized_categories: dict[str, dict[str, Any]] = {}
+    seen_raw_categories: set[str] = set()
     for raw_category in data["categories"]:
         if not isinstance(raw_category, dict):
             raise BackendError(502, "渠道汇总分类格式不正确")
-        category = raw_category.get("category")
-        category = category.strip().lower() if isinstance(category, str) else ""
+        raw_category_name = raw_category.get("category")
+        raw_category_name = (
+            raw_category_name.strip().lower()
+            if isinstance(raw_category_name, str)
+            else ""
+        )
+        category = canonical_channel_usage_category(raw_category_name)
         if (
             not re.fullmatch(r"[a-z0-9][a-z0-9_.-]{0,63}", category)
             or category == CHANNEL_SUMMARY_TOTAL_CATEGORY
-            or category in seen_categories
+            or raw_category_name in seen_raw_categories
         ):
             raise BackendError(502, "渠道汇总分类格式不正确")
-        seen_categories.add(category)
+        seen_raw_categories.add(raw_category_name)
         row_count = channel_summary_integer(raw_category.get("rows", 0), "渠道数量")
         alive_rows = channel_summary_integer(
             raw_category.get("alive_rows", 0),
@@ -265,14 +309,21 @@ def normalize_channel_summary(data: Any) -> dict[str, Any]:
         )
         if alive_rows > row_count:
             raise BackendError(502, "渠道汇总的启用渠道数量格式不正确")
-        normalized_categories.append(
-            {
+        quota = channel_summary_decimal(raw_category.get("quota", 0), "消耗额度")
+        current = normalized_categories.get(category)
+        if current is None:
+            normalized_categories[category] = {
                 "category": category,
-                "quota": channel_summary_decimal(raw_category.get("quota", 0), "消耗额度"),
+                "quota": quota,
                 "rows": row_count,
                 "alive_rows": alive_rows,
             }
-        )
+            continue
+        with localcontext() as context:
+            context.prec = 64
+            current["quota"] += quota
+        current["rows"] += row_count
+        current["alive_rows"] += alive_rows
 
     count = channel_summary_integer(data.get("count"), "渠道总数")
     if count > 0 and not normalized_categories:
@@ -280,7 +331,7 @@ def normalize_channel_summary(data: Any) -> dict[str, Any]:
     return {
         "count": count,
         "total_quota": channel_summary_decimal(data.get("total_quota"), "总消耗额度"),
-        "categories": normalized_categories,
+        "categories": list(normalized_categories.values()),
     }
 
 
@@ -1340,6 +1391,7 @@ class SessionStore:
                     ),
                 ).fetchall()
 
+        categories = merge_channel_summary_rows(list(categories))
         return {
             "available": True,
             "userId": upstream_user_id,
@@ -1350,7 +1402,7 @@ class SessionStore:
             "refreshedAt": int(total["refreshed_at"]),
             "categories": [
                 {
-                    "category": str(row["category"]),
+                    "category": row["category"],
                     "quota": decimal_text(Decimal(str(row["quota"]))),
                     "amount": channel_summary_amount(Decimal(str(row["quota"]))),
                     "channelCount": int(row["row_count"]),
@@ -1420,6 +1472,7 @@ class SessionStore:
                     ),
                 ).fetchall()
 
+        categories = merge_channel_summary_rows(list(categories))
         rates = self.category_rates(int(total["upstream_user_id"]))
         settled_amounts = self.category_settled_amounts(int(total["upstream_user_id"]))
         return {
@@ -1432,17 +1485,17 @@ class SessionStore:
             "refreshedAt": int(total["refreshed_at"]),
             "categories": [
                 {
-                    "category": str(row["category"]),
+                    "category": row["category"],
                     "ratePercent": decimal_text(rates.get(
-                        str(row["category"]),
+                        row["category"],
                         DEFAULT_CATEGORY_RATE_PERCENT,
                     )),
                     "quota": decimal_text(Decimal(str(row["quota"]))),
                     "amount": channel_summary_amount(Decimal(str(row["quota"]))),
-                    "settledAmount": dollar_amount(settled_amounts.get(str(row["category"]), Decimal(0))),
+                    "settledAmount": dollar_amount(settled_amounts.get(row["category"], Decimal(0))),
                     "outstandingAmount": dollar_amount(max(
                         Decimal(0), Decimal(quota_dollars(Decimal(str(row["quota"]))))
-                        - settled_amounts.get(str(row["category"]), Decimal(0)),
+                        - settled_amounts.get(row["category"], Decimal(0)),
                     )),
                     "channelCount": int(row["row_count"]),
                     "aliveChannelCount": int(row["alive_rows"]),
@@ -2166,7 +2219,14 @@ class SessionStore:
         *, payer: dict[str, Any],
     ) -> list[dict[str, Any]]:
         now = int(time.time() * 1000)
-        requested_amounts = dict(items)
+        requested_amounts: dict[str, Decimal] = {}
+        for raw_category, amount in items:
+            category = canonical_channel_usage_category(raw_category)
+            if category not in CHANNEL_USAGE_CATEGORIES:
+                raise BackendError(400, "渠道分类无效")
+            if category in requested_amounts:
+                raise BackendError(400, f"{category} 渠道分类不能重复结算")
+            requested_amounts[category] = amount
         ordered_categories = [
             category
             for category in CHANNEL_USAGE_CATEGORIES
@@ -2208,15 +2268,15 @@ class SessionStore:
                     raise BackendError(409, "请先同步该子账号的渠道分类总消耗")
                 snapshot_rows = self.connection.execute(
                     """
-                    SELECT category, quota
+                    SELECT category, quota, row_count, alive_rows
                     FROM channel_summary_snapshots
                     WHERE upstream_user_id = ? AND snapshot_id = ?
                     """,
                     (sub_account_user_id, snapshot["snapshot_id"]),
                 ).fetchall()
                 snapshot_quotas = {
-                    str(row["category"]): row["quota"]
-                    for row in snapshot_rows
+                    row["category"]: row["quota"]
+                    for row in merge_channel_summary_rows(list(snapshot_rows))
                 }
 
                 for category in ordered_categories:
@@ -2405,30 +2465,30 @@ class SessionStore:
                 """,
                 (user_id, max(1, min(limit, 101)), max(0, offset), user_id),
             ).fetchall()
-        grouped: dict[str, dict[str, Any]] = {}
-        for row in rows:
-            tx_id = str(row["tx_id"])
-            if tx_id not in grouped:
-                grouped[tx_id] = {
-                    "id": tx_id, "createdAt": int(row["created_at"]),
-                    "legacy": row["transaction_id"] is None,
-                    "payer": json.loads(row["payer_json"]) if row["payer_json"] else None,
-                    "payee": json.loads(row["payee_json"]) if row["payee_json"] else None,
-                    "items": [], "consumption": Decimal(0), "settlement": Decimal(0),
-                }
-            transaction = grouped[tx_id]
-            item = settlement_record_payload(dict(row))
-            item["settlementAmount"] = decimal_text(Decimal(str(row["settlement_amount"])))
-            transaction["items"].append(item)
-            transaction["consumption"] += Decimal(str(row["change_amount"]))
-            transaction["settlement"] += Decimal(str(row["settlement_amount"]))
-        return [{
-            "id": tx["id"], "createdAt": tx["createdAt"], "legacy": tx["legacy"],
-            "items": tx["items"],
-            "payer": tx["payer"], "payee": tx["payee"],
-            "totalConsumptionAmount": decimal_text(tx["consumption"]),
-            "totalSettlementAmount": decimal_text(tx["settlement"]),
-        } for tx in grouped.values()]
+        return settlement_transaction_payloads(rows)
+
+    def settlement_transactions_for_export(
+        self,
+        user_id: int,
+        max_records: int = 500_000,
+    ) -> list[dict[str, Any]]:
+        with self.lock:
+            rows = self.connection.execute(
+                """
+                SELECT records.*,
+                       COALESCE(records.transaction_id, 'legacy-' || CAST(records.id AS text)) AS tx_id
+                FROM category_settlement_records AS records
+                WHERE records.sub_account_user_id = ?
+                ORDER BY records.created_at DESC,
+                         COALESCE(records.transaction_id, 'legacy-' || CAST(records.id AS text)) DESC,
+                         records.id ASC
+                LIMIT ?
+                """,
+                (user_id, max_records + 1),
+            ).fetchall()
+        if len(rows) > max_records:
+            raise BackendError(413, "结算明细超过 500000 条，无法单次导出")
+        return settlement_transaction_payloads(rows)
 
     def delete_settlement_transaction(self, user_id: int, transaction_id: str) -> None:
         with self.lock:
@@ -3103,6 +3163,42 @@ def settlement_record_payload(record: DbRow) -> dict[str, Any]:
     }
 
 
+def settlement_transaction_payloads(rows: list[DbRow]) -> list[dict[str, Any]]:
+    grouped: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        tx_id = str(row["tx_id"])
+        if tx_id not in grouped:
+            grouped[tx_id] = {
+                "id": tx_id,
+                "createdAt": int(row["created_at"]),
+                "legacy": row["transaction_id"] is None,
+                "payer": json.loads(row["payer_json"]) if row["payer_json"] else None,
+                "payee": json.loads(row["payee_json"]) if row["payee_json"] else None,
+                "items": [],
+                "consumption": Decimal(0),
+                "settlement": Decimal(0),
+            }
+        transaction = grouped[tx_id]
+        item = settlement_record_payload(dict(row))
+        item["settlementAmount"] = decimal_text(Decimal(str(row["settlement_amount"])))
+        transaction["items"].append(item)
+        transaction["consumption"] += Decimal(str(row["change_amount"]))
+        transaction["settlement"] += Decimal(str(row["settlement_amount"]))
+    return [
+        {
+            "id": transaction["id"],
+            "createdAt": transaction["createdAt"],
+            "legacy": transaction["legacy"],
+            "items": transaction["items"],
+            "payer": transaction["payer"],
+            "payee": transaction["payee"],
+            "totalConsumptionAmount": decimal_text(transaction["consumption"]),
+            "totalSettlementAmount": decimal_text(transaction["settlement"]),
+        }
+        for transaction in grouped.values()
+    ]
+
+
 async def authorize_account_finance(session: DbRow, target_id: int) -> None:
     if is_super_admin(session):
         return
@@ -3161,7 +3257,7 @@ def sub_account_settlement_summary(
     target_id: int,
     requested_category: str | None = None,
 ) -> dict[str, Any]:
-    category_filter = requested_category.strip().lower() if requested_category else ""
+    category_filter = canonical_channel_usage_category(requested_category)
     if category_filter and category_filter not in CHANNEL_USAGE_CATEGORIES:
         raise BackendError(400, "渠道分类无效")
     category_filters = (category_filter,) if category_filter else CHANNEL_USAGE_CATEGORIES
@@ -3644,7 +3740,7 @@ async def forward_open_api(open_path: str, request: Request) -> JSONResponse:
 
 
 @app.api_route("/api/{api_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"])
-async def handle_api(api_path: str, request: Request) -> JSONResponse:
+async def handle_api(api_path: str, request: Request) -> Response:
     request_id = str(uuid.uuid4())
     cookie: tuple[str, int] | None = None
     try:
@@ -4081,6 +4177,42 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 cookie,
             )
 
+        mapping_settlement_export_match = re.fullmatch(
+            r"/api/user-mappings/([A-Za-z0-9_.-]{3,64})/settlements/export", path
+        )
+        if mapping_settlement_export_match and request.method == "GET":
+            public_username = mapping_settlement_export_match.group(1)
+            target_id = await authorize_mapping_finance(session, public_username)
+            if any(key != "language" for key in request.query_params):
+                raise BackendError(400, "不支持的查询参数")
+            language = request.query_params.get("language", "zh")
+            if language not in {"zh", "en"}:
+                raise BackendError(400, "导出语言无效")
+            transactions = store.settlement_transactions_for_export(target_id)
+            if not transactions:
+                message = "No settlement history to export" if language == "en" else "暂无可导出的结算记录"
+                raise BackendError(404, message)
+            content = await asyncio.to_thread(
+                build_settlement_workbook,
+                transactions,
+                username=public_username,
+                user_id=target_id,
+                language=language,
+            )
+            filename = settlement_export_filename(public_username)
+            response = Response(
+                content=content,
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={
+                    "cache-control": "no-store",
+                    "content-disposition": f'attachment; filename="{filename}"',
+                    "x-content-type-options": "nosniff",
+                },
+            )
+            if cookie:
+                response.headers.append("set-cookie", session_cookie(request, cookie[0], cookie[1]))
+            return response
+
         delete_settlement_match = re.fullmatch(
             r"/api/user-mappings/([A-Za-z0-9_.-]{3,64})/settlements/([A-Za-z0-9-]{1,80})", path
         )
@@ -4121,8 +4253,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                 for raw_item in raw_items:
                     if not isinstance(raw_item, dict):
                         raise BackendError(400, "批量结算项目格式不正确")
-                    category = raw_item.get("category")
-                    category = category.strip().lower() if isinstance(category, str) else ""
+                    category = canonical_channel_usage_category(raw_item.get("category"))
                     if category not in CHANNEL_USAGE_CATEGORIES:
                         raise BackendError(400, "渠道分类无效")
                     if category in seen_categories:
@@ -4171,8 +4302,7 @@ async def handle_api(api_path: str, request: Request) -> JSONResponse:
                     cookie,
                 )
 
-            category = body.get("category")
-            category = category.strip().lower() if isinstance(category, str) else ""
+            category = canonical_channel_usage_category(body.get("category"))
             if category not in CHANNEL_USAGE_CATEGORIES:
                 raise BackendError(400, "渠道分类无效")
             raw_consumption_amount = body.get("consumptionAmount")

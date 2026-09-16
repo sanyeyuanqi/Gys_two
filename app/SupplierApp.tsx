@@ -14,6 +14,7 @@ import {
   CircleDollarSign,
   ClipboardCopy,
   Database,
+  Download,
   Eye,
   EyeOff,
   FileKey2,
@@ -403,6 +404,11 @@ const englishTranslations: Record<string, string> = {
   '该账号存在结算历史，禁止删除': 'This account has settlement history and cannot be deleted',
   '查看结算': 'View Settlements',
   '查看 {{name}} 的结算记录': 'View settlements for {{name}}',
+  '导出': 'Export',
+  '正在导出...': 'Exporting...',
+  '导出结算记录失败': 'Failed to export settlement history',
+  '暂无可导出的结算记录': 'No settlement history to export',
+  '结算记录已导出': 'Settlement history exported',
   '每页10笔交易': '10 transactions per page',
   '显示最近100笔交易': 'Showing the latest 100 transactions',
   '交易编号': 'Transaction ID',
@@ -1034,8 +1040,18 @@ const categoryLabelsEn: Record<string, string> = {
   cloudflare: 'Cloudflare Claude',
 };
 
+const channelUsageCategoryAliases: Record<string, string> = {
+  awsb: 'aws',
+};
+
+function canonicalChannelUsageCategory(category: string) {
+  const normalized = category.trim().toLowerCase();
+  return channelUsageCategoryAliases[normalized] || normalized;
+}
+
 function categoryLabel(category: string, language: Language) {
-  return (language === 'en' ? categoryLabelsEn : categoryLabels)[category] || category;
+  const canonical = canonicalChannelUsageCategory(category);
+  return (language === 'en' ? categoryLabelsEn : categoryLabels)[canonical] || category;
 }
 
 const keyFormatHints: Record<string, string> = {
@@ -1146,6 +1162,11 @@ const channelUsageCategories = [
   'openrouter',
   'opencode',
 ];
+const channelUsageCategorySet = new Set(channelUsageCategories);
+
+function isSupportedChannelUsageCategory(category: string) {
+  return channelUsageCategorySet.has(canonicalChannelUsageCategory(category));
+}
 
 const defaultCategoryRatePercent = '0';
 
@@ -1449,6 +1470,28 @@ function formatBeijingDateTime(value: number, language: Language = 'zh') {
     second: '2-digit',
     hour12: false,
   });
+}
+
+function exportTimestamp() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+  }).formatToParts(new Date());
+  const value = (type: Intl.DateTimeFormatPartTypes) => parts.find(part => part.type === type)?.value || '';
+  return `${value('year')}${value('month')}${value('day')}-${value('hour')}${value('minute')}${value('second')}`;
+}
+
+function downloadBlob(filename: string, blob: Blob) {
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = filename;
+  anchor.style.display = 'none';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function parseDateInputValue(value: string) {
@@ -5306,7 +5349,10 @@ function UserMappingUsageDialog({
   const [syncError, setSyncError] = useState('');
   const [settlingItems, setSettlingItems] = useState<UserChannelUsageSnapshot['categories'] | null>(null);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
-  const selectableItems = (snapshot?.categories || []).filter(item => Number(item.outstandingAmount) >= 1);
+  const selectableItems = (snapshot?.categories || []).filter(item => (
+    isSupportedChannelUsageCategory(item.category)
+    && Number(item.outstandingAmount) >= 1
+  ));
   const selectedItems = selectableItems.filter(item => selectedCategories.includes(item.category));
   const hasSnapshotRef = useRef(false);
   const loadedMappingRef = useRef('');
@@ -5482,7 +5528,7 @@ function UserMappingUsageDialog({
                           <td className="user-usage-selection">
                             <input type="checkbox" aria-label={`${t('选择')} ${categoryLabel(item.category, language)}`}
                               checked={selectedItems.some(selected => selected.category === item.category)}
-                              disabled={!(Number(item.outstandingAmount) >= 1)}
+                              disabled={!isSupportedChannelUsageCategory(item.category) || !(Number(item.outstandingAmount) >= 1)}
                               onChange={event => setSelectedCategories(current => event.target.checked
                                 ? [...new Set([...current, item.category])] : current.filter(category => category !== item.category))} />
                           </td>
@@ -5494,7 +5540,7 @@ function UserMappingUsageDialog({
                           <td className="user-usage-amount">{payable == null ? '—' : formatDollarText(String(payable))}</td>
                           <td>
                             <ActionButton className="user-usage-settle-button" type="button"
-                              disabled={!(Number(item.outstandingAmount) >= 1)}
+                              disabled={!isSupportedChannelUsageCategory(item.category) || !(Number(item.outstandingAmount) >= 1)}
                               onClick={() => setSettlingItems([item])}>
                               <CircleDollarSign size={15} aria-hidden="true" />{t('结算')}
                             </ActionButton>
@@ -5558,7 +5604,10 @@ function UserMappingUsageDialog({
             setSnapshot(current => current ? {
               ...current,
               categories: current.categories.map(item => {
-                const category = categories.find(category => category.category === item.category);
+                const category = categories.find(category => (
+                  canonicalChannelUsageCategory(category.category)
+                  === canonicalChannelUsageCategory(item.category)
+                ));
                 return category ? { ...item, settledAmount: category.settledAmount, outstandingAmount: category.outstandingAmount, ratePercent: category.ratePercent } : item;
               }),
             } : current);
@@ -5617,7 +5666,10 @@ function MappingSettlementDialog({ mapping, items, onClose, onSaved }: {
     try {
       const result = await api<BatchSettlementResponse>(
         `/api/user-mappings/${encodeURIComponent(mapping.public_username)}/settlements`,
-        { method: 'POST', body: { items: items.map(item => ({ category: item.category, consumptionAmount: amounts[item.category] })) } },
+        { method: 'POST', body: { items: items.map(item => ({
+          category: canonicalChannelUsageCategory(item.category),
+          consumptionAmount: amounts[item.category],
+        })) } },
       );
       onSaved(result.settlementSummary.categories.map(category => ({
         ...category,
@@ -5767,6 +5819,7 @@ function SettlementTransactionList({ transactions, onDelete }: {
           <th scope="col">{t('交易编号')}</th>
           <th scope="col">{t('付款人')}</th>
           <th scope="col">{t('收款人')}</th>
+          <th scope="col">{t('创建时间')}</th>
           <th scope="col">{t('结算金额')}（USD）</th>
           <th scope="col">{t('操作')}</th>
         </tr></thead>
@@ -5778,6 +5831,11 @@ function SettlementTransactionList({ transactions, onDelete }: {
             </td>
             <td><strong>{transaction.payee?.username || t('未记录')}</strong>
               {transaction.payee?.displayName && transaction.payee.displayName !== transaction.payee.username && <small>{transaction.payee.displayName}</small>}
+            </td>
+            <td className="settlement-table-time">
+              <time dateTime={new Date(transaction.createdAt).toISOString()}>
+                {formatBeijingDateTime(transaction.createdAt, language)}
+              </time>
             </td>
             <td className="settlement-table-amount">${formatNumericText(transaction.totalSettlementAmount)}</td>
             <td><div className="settlement-table-actions">
@@ -5981,13 +6039,16 @@ function UserMappingSettlementsDialog({ mapping, onClose }: {
   mapping: Pick<UserMapping, 'public_username' | 'upstream_user_id'>;
   onClose: () => void;
 }) {
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
   const [transactions, setTransactions] = useState<SettlementTransaction[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [attempt, setAttempt] = useState(0);
   const [page, setPage] = useState(1);
   const [hasMore, setHasMore] = useState(false);
+  const [exporting, setExporting] = useState(false);
+  const [exportNotice, setExportNotice] = useState<Notice | null>(null);
+  const exportingRef = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     setLoading(true);
@@ -6007,6 +6068,53 @@ function UserMappingSettlementsDialog({ mapping, onClose }: {
     });
     return () => controller.abort();
   }, [mapping.public_username, page, attempt, t]);
+
+  async function exportSettlements() {
+    if (exportingRef.current) return;
+    exportingRef.current = true;
+    setExporting(true);
+    setExportNotice(null);
+    const exportPath = `/api/user-mappings/${encodeURIComponent(mapping.public_username)}/settlements/export?language=${language}`;
+    try {
+      const response = await sessionClient.fetch(exportPath);
+      if (!response.ok) {
+        let payload: ApiEnvelope<unknown> = {};
+        try {
+          const parsed = await response.json();
+          if (parsed && typeof parsed === 'object') payload = parsed as ApiEnvelope<unknown>;
+        } catch {
+          // The status still provides a useful fallback message for non-JSON failures.
+        }
+        const code = normalizeApiCode(payload.code);
+        throw new ApiRequestError(
+          getApiErrorMessage(payload, response.status, code),
+          response.status,
+          code,
+          payload.request_id,
+        );
+      }
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')) {
+        throw new Error(t('导出结算记录失败'));
+      }
+      const workbook = await response.blob();
+      if (!workbook.size) throw new Error(t('导出结算记录失败'));
+      const safeUsername = mapping.public_username.replace(/[^A-Za-z0-9_.-]+/g, '-');
+      const contentDisposition = response.headers.get('content-disposition') || '';
+      const responseFilename = /filename="?([^";]+)"?/i.exec(contentDisposition)?.[1];
+      downloadBlob(responseFilename || `settlements-${safeUsername}-${exportTimestamp()}.xlsx`, workbook);
+      setExportNotice({ type: 'ok', text: t('结算记录已导出') });
+    } catch (failure) {
+      if (failure instanceof SessionExpiredError) redirectToLogin(exportPath, failure.message);
+      setExportNotice({
+        type: 'error',
+        text: failure instanceof Error ? failure.message : t('导出结算记录失败'),
+      });
+    } finally {
+      exportingRef.current = false;
+      setExporting(false);
+    }
+  }
   return (
     <Dialog open onOpenChange={open => { if (!open) onClose(); }}>
       <DialogContent className="user-usage-dialog mapping-settlements-dialog" showCloseButton={false}>
@@ -6041,10 +6149,17 @@ function UserMappingSettlementsDialog({ mapping, onClose }: {
             <span>{t('第 {{page}} 页', { page })}</span>
             <ActionButton className="ghost-button compact" type="button" disabled={loading || !!error || !hasMore} onClick={() => setPage(value => value + 1)}>{t('下一页')}</ActionButton>
           </div>
-          <ActionButton className="ghost-button compact" type="button" disabled={loading} onClick={() => setAttempt(value => value + 1)}>
-            <RefreshCcw size={15} className={loading ? 'spin' : undefined} />{t('刷新')}
-          </ActionButton>
+          <div className="settlement-dialog-footer-actions">
+            <ActionButton className="ghost-button compact" type="button" disabled={loading || exporting || !!error || !transactions.length} onClick={() => void exportSettlements()}>
+              {exporting ? <Loader2 size={15} className="spin" /> : <Download size={15} />}
+              {t(exporting ? '正在导出...' : '导出')}
+            </ActionButton>
+            <ActionButton className="ghost-button compact" type="button" disabled={loading || exporting} onClick={() => setAttempt(value => value + 1)}>
+              <RefreshCcw size={15} className={loading ? 'spin' : undefined} />{t('刷新')}
+            </ActionButton>
+          </div>
         </div>
+        <NoticeBanner notice={exportNotice} />
       </DialogContent>
     </Dialog>
   );

@@ -4211,17 +4211,19 @@ textarea:focus {
 .settlement-transactions-table { width: 100%; min-width: 1000px; table-layout: fixed; }
 .settlement-transactions-table th, .settlement-transactions-table td { padding: 18px 16px; text-align: left; vertical-align: middle; font-size: 14px; line-height: 1.6; }
 .settlement-transactions-table th { background: #f7f9fc; color: #667085; font-weight: 600; }
-.settlement-transactions-table th:first-child { width: 24%; }
-.settlement-transactions-table th:nth-child(2), .settlement-transactions-table th:nth-child(3) { width: 16%; }
-.settlement-transactions-table th:nth-child(4) { width: 18%; }
-.settlement-transactions-table th:last-child { width: 26%; }
-.settlement-transactions-table th:nth-child(4), .settlement-transactions-table td:nth-child(4) { text-align: right; }
+.settlement-transactions-table th:first-child { width: 22%; }
+.settlement-transactions-table th:nth-child(2), .settlement-transactions-table th:nth-child(3) { width: 13%; }
+.settlement-transactions-table th:nth-child(4) { width: 17%; }
+.settlement-transactions-table th:nth-child(5) { width: 13%; }
+.settlement-transactions-table th:last-child { width: 22%; }
+.settlement-transactions-table th:nth-child(5), .settlement-transactions-table td:nth-child(5) { text-align: right; }
 .settlement-transactions-table th:last-child { text-align: center; }
 .settlement-transactions-table tbody tr:last-child td { border-bottom: 0; }
 .settlement-transactions-table tbody tr:hover { background: #fafcff; }
 .settlement-transactions-table td strong { display: block; color: #344054; font-weight: 500; overflow-wrap: anywhere; }
 .settlement-transactions-table td small { display: block; color: #667085; overflow-wrap: anywhere; }
 .settlement-table-id { font-size: 12px; color: #475467; background: transparent; padding: 0; overflow-wrap: anywhere; white-space: normal; }
+.settlement-table-time { color: #475467; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .settlement-table-amount { color: #175cd3; font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .settlement-table-actions { display: flex; flex-wrap: nowrap; justify-content: center; align-items: center; gap: 8px; white-space: nowrap; }
 .settlement-table-actions > button { flex-shrink: 0; }
@@ -4230,6 +4232,7 @@ textarea:focus {
 .settlement-details-dialog { z-index: 100; }
 .settlement-dialog-pagination { display: flex; align-items: center; justify-content: center; gap: 10px; flex-wrap: nowrap; font-size: 13px; }
 .mapping-settlements-dialog .user-usage-dialog-footer { flex-wrap: wrap; }
+.settlement-dialog-footer-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
 .settlement-delete-dialog {
   z-index: 120;
   width: min(440px, calc(100vw - 32px));
