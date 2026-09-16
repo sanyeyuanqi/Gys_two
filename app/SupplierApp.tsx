@@ -1147,6 +1147,8 @@ const channelUsageCategories = [
   'opencode',
 ];
 
+const defaultCategoryRatePercent = '0';
+
 const uploadCategoryVariants: Record<string, string> = {
   aws: 'Bedrock 密钥',
   aws_a: 'Claude 代理 (api.aws) · 新版',
@@ -6823,7 +6825,7 @@ function SubAccountRateDialog({
 }) {
   const { language, t } = useLanguage();
   const [rates, setRates] = useState<Record<string, string>>(() => Object.fromEntries(
-    channelUsageCategories.map((category) => [category, '100']),
+    channelUsageCategories.map((category) => [category, defaultCategoryRatePercent]),
   ));
   const [loading, setLoading] = useState(true);
   const [loaded, setLoaded] = useState(false);
@@ -6843,7 +6845,8 @@ function SubAccountRateDialog({
         if (controller.signal.aborted) return;
         setRates(Object.fromEntries(channelUsageCategories.map((category) => [
           category,
-          value.rates.find((item) => item.category === category)?.ratePercent || '100',
+          value.rates.find((item) => item.category === category)?.ratePercent
+            ?? defaultCategoryRatePercent,
         ])));
         setLoaded(true);
       })

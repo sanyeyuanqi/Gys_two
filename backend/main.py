@@ -64,6 +64,7 @@ CHANNEL_USAGE_CATEGORIES = (
     "openrouter",
     "opencode",
 )
+DEFAULT_CATEGORY_RATE_PERCENT = Decimal(0)
 PUBLIC_AUTH = {
     "/api/auth/login-captcha",
     "/api/auth/captcha/slide",
@@ -423,7 +424,7 @@ class SessionStore:
                     CREATE TABLE IF NOT EXISTS category_exchange_rates (
                         sub_account_user_id BIGINT NOT NULL,
                         category TEXT NOT NULL,
-                        rate_percent TEXT NOT NULL DEFAULT '100',
+                        rate_percent TEXT NOT NULL DEFAULT '0',
                         settled_amount TEXT NOT NULL DEFAULT '0',
                         updated_at BIGINT NOT NULL,
                         PRIMARY KEY (sub_account_user_id, category)
@@ -461,6 +462,10 @@ class SessionStore:
                     """
                     ALTER TABLE category_exchange_rates
                     ADD COLUMN IF NOT EXISTS settled_amount TEXT NOT NULL DEFAULT '0'
+                    """,
+                    """
+                    ALTER TABLE category_exchange_rates
+                    ALTER COLUMN rate_percent SET DEFAULT '0'
                     """,
                     """
                     ALTER TABLE category_settlement_records
@@ -1428,7 +1433,10 @@ class SessionStore:
             "categories": [
                 {
                     "category": str(row["category"]),
-                    "ratePercent": decimal_text(rates.get(str(row["category"]), Decimal("100"))),
+                    "ratePercent": decimal_text(rates.get(
+                        str(row["category"]),
+                        DEFAULT_CATEGORY_RATE_PERCENT,
+                    )),
                     "quota": decimal_text(Decimal(str(row["quota"]))),
                     "amount": channel_summary_amount(Decimal(str(row["quota"]))),
                     "settledAmount": dollar_amount(settled_amounts.get(str(row["category"]), Decimal(0))),
@@ -2046,7 +2054,10 @@ class SessionStore:
                 """,
                 (sub_account_user_id,),
             ).fetchall()
-        rates = {category: Decimal("100") for category in CHANNEL_USAGE_CATEGORIES}
+        rates = {
+            category: DEFAULT_CATEGORY_RATE_PERCENT
+            for category in CHANNEL_USAGE_CATEGORIES
+        }
         for row in rows:
             category = str(row["category"])
             if category not in rates:
@@ -2243,7 +2254,7 @@ class SessionStore:
                             f"{category} 渠道分类消耗数据格式不正确",
                         ) from error
                     row = rate_rows_by_category.get(category)
-                    rate = Decimal("100")
+                    rate = DEFAULT_CATEGORY_RATE_PERCENT
                     previous = Decimal(0)
                     if row is not None:
                         try:
